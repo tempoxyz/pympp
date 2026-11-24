@@ -1,0 +1,96 @@
+{
+  "generated": 1794514204,
+  "jwks": {
+    "keys": [
+      {
+        "e": "AQAB",
+        "kid": "key-1",
+        "kty": "RSA",
+        "n": "9DUvYMJMZ_L35J0ADfQ8JTaoX6YsucBSQ-NQQ_yhYHXZwEsK-2mghSmrsWacjLGqSVPkBrcD-HoRkeEDTxZ4wfPNCG8DF8J1d64iy-BfYK1jt6FzvzRcY1XKBiUbczvoKT1qbklPhu2KaJUGejIji0K9-ivIEuOTg8aOEZhTN-pVEUi5Kh8TkuppdJltUkIQ44R2ulhjgauDZkRZ04C_7mSRp-rYfkzr0ZiI2Tl_L4HclDlYxBrkMPQZeA8JzFDbd_8CNmwmXiPkjWdZ0PYmPMfLTC36nOnqZzcWgv_J8I3EgQZvCyBcTTYpK2dkqKm9HjEf7PXd6OXsUheybIrZoQ"
+      }
+    ]
+  },
+  "source": "did:pkh:eip155:4217:0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed",
+  "vectors": [
+    {
+      "name": "dpop with id token",
+      "request": {
+        "method": "POST",
+        "url": "https://api.example/paid?page=2",
+        "headers": {
+          "authorization": "DPoP eyJhbGciOiJSUzI1NiIsImtpZCI6ImtleS0xIiwidHlwIjoiYXQrand0In0.eyJpc3MiOiJodHRwczovL2lkLnRlbXBvLnh5eiIsInN1YiI6InVzZXItMSIsImF1ZCI6Imh0dHBzOi8vaWQudGVtcG8ueHl6IiwiY2xpZW50X2lkIjoiYXBwXzEiLCJleHAiOjIxMDk4NzQyMDQsImFjY2Vzc19rZXlzIjpbeyJhY2NvdW50IjoiMHg1YWFlYjYwNTNmM2U5NGM5YjlhMDlmMzM2Njk0MzVlN2VmMWJlYWVkIiwiY2hhaW5faWQiOjQyMTd9XSwiY29tcGxpYW5jZSI6eyIweDVhYWViNjA1M2YzZTk0YzliOWEwOWYzMzY2OTQzNWU3ZWYxYmVhZWQiOiJjbGVhciJ9LCJjbmYiOnsiamt0IjoiQ0ptSEpQOHh2bG5yeGhSajZXbFEycFpxcFlQYm5yQnBZUl9RcDAyN0pmZyJ9fQ.u4TJBxPBLtWTfdeYY81WChU_30WbBtBUnGFJ-4BUVRpWwJ9U0a8id18MbLTXY9ruxXMYvuQVx3tgeophIjFgOy2rBK5KE_B3pECmKYUKPvXbXmWySwhSGbfNTAIXvAv06ASQZipe5qznyAHDpDLW3IXf2EQkDNoodY9D5GivuSpWu0Vmk0YOvSD9mH3CHlzMPsy68DLEU1x7aHTQOigFE9nGV4j8Xa5f2QShywBRWdrP26ChW9i9fXlz_IK2C9rzBhCKEjrQWkABkBa_o6R7pmYJrjAReNzf6_IhBXFro-GgkQh5K4AlzoI_g3xBI-NKUiRRsMw2_5oD5BzC4lrw1w",
+          "dpop": "eyJhbGciOiJFUzI1NiIsImp3ayI6eyJjcnYiOiJQLTI1NiIsImt0eSI6IkVDIiwieCI6Imt4NVBaYkFyVUVKcHBEMXNJSlNtM1FfVnlIYWhPcjRJTTFjaXFCeGtJUUkiLCJ5IjoidjU5YUpDTTJpU29XTzJFQmZpUzRaLXNSN3I1aFN1TzNOelExSnM0cFQ2WSJ9LCJ0eXAiOiJkcG9wK2p3dCJ9.eyJhdGgiOiJPLW9XY29rWTlJcWR4NUk4d21vZ3VmZnBMY1pyUDNlT1laV3V6M2tmY2tRIiwiaHRtIjoiUE9TVCIsImh0dSI6Imh0dHBzOi8vYXBpLmV4YW1wbGUvcGFpZCIsImlhdCI6MTc5NDUxNDIwNCwianRpIjoiMzZlYjI5YjYtN2YyOC00ZjRlLWIxZTgtNDE1YTFmMWRhODQwIn0.TIzw4uUu1HWD7zfQL5aBRAwsYu7Hl19iHCEaZzbf5od-_7T86DrGag-Q53ffFtLqX0UY-pyzx1kouzFcDDIIUw",
+          "tempo-id-token": "eyJhbGciOiJSUzI1NiIsImtpZCI6ImtleS0xIiwidHlwIjoiSldUIn0.eyJpc3MiOiJodHRwczovL2lkLnRlbXBvLnh5eiIsInN1YiI6InVzZXItMSIsImF1ZCI6ImFwcF8xIiwiZXhwIjoyMTA5ODc0MjA0LCJlbWFpbCI6IkFsaWNlQEV4YW1wbGUuY29tIiwiZW1haWxfdmVyaWZpZWQiOnRydWV9.slqk9aK9LM2RErJiO9acCnqwH2QSTYZAcgkCqPg7_Jiz8xrsA4P3K6rXr5B64avrTbhf-X6_eKXp3P5rX83HU-2JB5HXbCNXexfaCQuw6fV8e6_CheCRGY0tMRrfR8Icqvo-n94jD-zALmNVa0OcVJb9Fq1aEiLygaHX-eq583a8zCHJg4ZbS6CKn-rNS5qDfozNcRIv8Gqz_O4oq7tZtjQGpnEsIRWE8rAuWBMtfpMEQobkm3KPIAXAX7heTxv_YAsuRQFF6ISxrWUw8fe9OuzYSjE4D1QRGOzUyR25RDFZZMMeW88ECIFuW-kq8GAV1KKvuEMTfAxSh2AsA2qVYQ"
+        }
+      },
+      "caller": {
+        "status": "valid",
+        "value": {
+          "accounts": [
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+          ],
+          "clientId": "app_1",
+          "compliance": {
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed": "clear"
+          },
+          "email": "alice@example.com",
+          "emailVerified": true,
+          "userId": "user-1"
+        }
+      },
+      "payer": {
+        "status": "valid",
+        "value": {
+          "accounts": [
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+          ],
+          "clientId": "app_1",
+          "compliance": {
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed": "clear"
+          },
+          "email": "alice@example.com",
+          "emailVerified": true,
+          "userId": "user-1",
+          "account": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+        }
+      }
+    },
+    {
+      "name": "bearer",
+      "request": {
+        "method": "POST",
+        "url": "https://api.example/paid?page=2",
+        "headers": {
+          "authorization": "Bearer eyJhbGciOiJSUzI1NiIsImtpZCI6ImtleS0xIiwidHlwIjoiYXQrand0In0.eyJpc3MiOiJodHRwczovL2lkLnRlbXBvLnh5eiIsInN1YiI6InVzZXItMSIsImF1ZCI6Imh0dHBzOi8vaWQudGVtcG8ueHl6IiwiY2xpZW50X2lkIjoiYXBwXzEiLCJleHAiOjIxMDk4NzQyMDQsImFjY2Vzc19rZXlzIjpbeyJhY2NvdW50IjoiMHg1YWFlYjYwNTNmM2U5NGM5YjlhMDlmMzM2Njk0MzVlN2VmMWJlYWVkIiwiY2hhaW5faWQiOjQyMTd9XSwiY29tcGxpYW5jZSI6eyIweDVhYWViNjA1M2YzZTk0YzliOWEwOWYzMzY2OTQzNWU3ZWYxYmVhZWQiOiJjbGVhciJ9fQ.cnuujYFiA5z5_XaHMKFectS_oWK8U9hfxa_xwPWrfInRecWGPWLC39fB2n0I6OnCUksN24S2betc5-2547nQfg_8NEjmNPZ9KV--xPhGEY-Que3LVTOg-gkQ6eVxUyPXBvhSZDg6lmSpqFm1f4N5lnRISt3f49Ykgvg_BvCHoD34NvveFY0uX2vBMmaZS8AeazhRvnYIXjVw0oy1xPBgWqgpQnCDWvUb0CTtN_GZALyikRblIkEE8H_DnDzRyMS2WcboHYvJUbbU3wYMyXygYN1pj0LeJJhiRU0W-0ST__lDwCd9blSveObaH-3OlQLLjae8P4UiR6dqrqeMUHNWoQ"
+        }
+      },
+      "caller": {
+        "status": "valid",
+        "value": {
+          "accounts": [
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+          ],
+          "clientId": "app_1",
+          "compliance": {
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed": "clear"
+          },
+          "userId": "user-1"
+        }
+      },
+      "payer": {
+        "status": "valid",
+        "value": {
+          "accounts": [
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+          ],
+          "clientId": "app_1",
+          "compliance": {
+            "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed": "clear"
+          },
+          "userId": "user-1",
+          "account": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+        }
+      }
+    }
+  ]
+}

@@ -107,6 +107,23 @@ class SettleResponse(TypedDict):
     errorMessage: NotRequired[str]
 
 
+class SupportedKind(TypedDict):
+    """One payment kind a facilitator supports, from ``GET /supported``."""
+
+    x402Version: int
+    scheme: str
+    network: str
+    extra: NotRequired[dict[str, Any]]
+
+
+class SupportedResponse(TypedDict):
+    """Facilitator ``GET /supported`` response."""
+
+    kinds: list[SupportedKind]
+    extensions: NotRequired[list[str]]
+    signers: NotRequired[dict[str, list[str]]]
+
+
 def _object(value: Any, name: str) -> dict[str, Any]:
     if not is_mapping(value):
         raise X402FormatError(f"{name} must be an object")
@@ -249,6 +266,39 @@ def parse_settle_response(value: Any) -> SettleResponse:
         _optional_string(record, key, "settleResponse")
     if record.get("amount") is not None:
         _pattern(record, "amount", "settleResponse", _ATOMIC_AMOUNT_RE)
+    return record  # type: ignore[return-value]
+
+
+def parse_supported_response(value: Any) -> SupportedResponse:
+    """Validate a facilitator ``GET /supported`` response."""
+    record = _object(value, "supportedResponse")
+    kinds = record.get("kinds")
+    if not is_list(kinds):
+        raise X402FormatError("supportedResponse.kinds must be an array")
+    for index, kind in enumerate(kinds):
+        name = f"supportedResponse.kinds[{index}]"
+        kind = _object(kind, name)
+        version = kind.get("x402Version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise X402FormatError(f"{name}.x402Version must be an integer")
+        _string(kind, "scheme", name)
+        _string(kind, "network", name)
+        # Present members must match SupportedResponse's types; null is not allowed.
+        if "extra" in kind:
+            _object(kind["extra"], f"{name}.extra")
+    extensions = record.get("extensions")
+    if "extensions" in record and (
+        not is_list(extensions) or not all(isinstance(item, str) for item in extensions)
+    ):
+        raise X402FormatError("supportedResponse.extensions must be an array of strings")
+    signers = record.get("signers")
+    if "signers" in record:
+        for key, value in _object(signers, "supportedResponse.signers").items():
+            if not is_list(value) or not all(isinstance(item, str) for item in value):
+                raise X402FormatError(
+                    # repr() so a facilitator-chosen key can't add lines to the error.
+                    f"supportedResponse.signers[{key!r}] must be an array of strings"
+                )
     return record  # type: ignore[return-value]
 
 

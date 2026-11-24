@@ -465,3 +465,84 @@ def test_select_offers_must_be_callable() -> None:
             secret_key="secret-0123456789abcdef0123456789abcdef",
             select_offers=cast(Any, object()),
         )
+
+
+async def test_settled_receipt_with_invalid_method_still_sends_its_header():
+    # A receipt's method that the grammar rejects must not turn a settled charge into a 500.
+    async def settle(_context: VerifyContext) -> Receipt:
+        return Receipt.success("ref", method="vendor-v2")
+
+    server = create_server(third_party_method("vendor", verify=settle))
+    issued = challenge(await server.charge(amount="1.00")(http_request()))
+
+    paid = await server.charge(amount="1.00")(http_request(credential(issued).to_authorization()))
+
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.method == "vendor"
+    assert Receipt.from_payment_receipt(paid.receipt.to_payment_receipt()).method == "vendor"
+
+
+class _NarrowReceipt(Receipt):
+    """A Receipt subclass whose constructor takes only a reference."""
+
+    __slots__ = ()
+
+    def __init__(self, reference: str) -> None:
+        Receipt.__init__(
+            self,
+            status="success",
+            timestamp=Receipt.success(reference).timestamp,
+            reference=reference,
+            method="vendor-v2",
+        )
+
+
+async def test_settled_narrow_receipt_subclass_with_invalid_method_still_sends_its_header():
+    # The invalid subclass is replaced by a plain receipt carrying the challenge's method.
+    from mpp.server import Response
+
+    original = _NarrowReceipt("ref")
+
+    async def settle(_context: VerifyContext) -> Receipt:
+        return original
+
+    server = create_server(third_party_method("vendor", verify=settle))
+    issued = challenge(await server.charge(amount="1.00")(http_request()))
+
+    paid = await server.charge(amount="1.00")(http_request(credential(issued).to_authorization()))
+
+    assert isinstance(paid, PaymentVerified)
+    assert type(paid.receipt) is Receipt
+    assert paid.receipt.method == "vendor"
+    assert paid.receipt.reference == "ref"
+    assert original.method == "vendor-v2"
+    header = paid.with_receipt(Response.json({})).headers["payment-receipt"]
+    parsed = Receipt.from_payment_receipt(header)
+    assert parsed.method == "vendor"
+    assert parsed.reference == "ref"
+
+
+async def test_settle_rejects_an_invalid_challenge_method_before_any_hook():
+    from mpp import ParseError
+
+    calls: list[str] = []
+
+    async def settle(_context: VerifyContext) -> Receipt:
+        calls.append("verify")
+        return Receipt.success("ref")
+
+    method = third_party_method("vendor", verify=settle)
+    issued = Challenge(id="id", method="vendor-v2", intent="charge", request={})
+    context = VerifyContext(credential=credential(issued), request={}, challenge=issued)
+
+    with pytest.raises(ParseError, match="Invalid payment method id"):
+        await method.settle(context)
+    assert calls == []
+
+
+def test_handler_factory_refuses_an_invalid_method_name():
+    from mpp.server import HandlerFactory
+
+    server = create_server(third_party_method("vendor"))
+    with pytest.raises(ValueError, match="Invalid payment method name"):
+        HandlerFactory(server, [third_party_method("vendor-v2")])

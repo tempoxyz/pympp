@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from mpp import Credential, Receipt
+from mpp._typing import is_dict
 from mpp.methods.stripe import _defaults
 from mpp.methods.stripe.analytics import build_analytics
 from mpp.methods.stripe.connect import ConnectSettlement
@@ -35,6 +36,7 @@ async def record_crypto_payment(
 ) -> None:
     """Record a settled crypto transfer; failure cannot undo settlement."""
     reference = receipt.reference
+    idempotency_key = _idempotency_key(reference, credential)
     options = payment_intent_options or {}
     try:
         cents = recorded_cents(network, request)
@@ -66,7 +68,7 @@ async def record_crypto_payment(
         }
         params = {**required, **options, "metadata": resolved_metadata}
         try:
-            await _create(client, params, reference, connect)
+            await _create(client, params, idempotency_key, connect)
         except Exception as error:
             if not (metadata or options) or not _optional_rejection(error):
                 raise
@@ -74,7 +76,7 @@ async def record_crypto_payment(
                 "[stripe] optional PaymentIntent fields rejected for %r; retrying without them",
                 reference,
             )
-            await _create(client, required, f"{reference}_fallback", connect)
+            await _create(client, required, f"{idempotency_key}_fallback", connect)
     except Exception as error:
         logger.warning(
             "[stripe] failed to record crypto payment network=%r transaction_hash=%r: %s",
@@ -82,6 +84,20 @@ async def record_crypto_payment(
             reference,
             error,
         )
+
+
+def _idempotency_key(reference: str, credential: Credential | None) -> str:
+    """Key a recording by the payment, not just its transaction.
+
+    One Tempo transaction settles a batch of Zone withdrawals, so a Zone payment's
+    reference is shared; its sender tag names the one withdrawal.
+    """
+    payload = credential.payload if credential is not None else None
+    if is_dict(payload) and payload.get("type") == "zone":
+        sender_tag = payload.get("senderTag")
+        if isinstance(sender_tag, str):
+            return f"{reference}:{sender_tag.lower()}"
+    return reference
 
 
 async def _create(

@@ -7,19 +7,29 @@ charge challenges; :class:`TempoMethod` implements its credential creation.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
 
+import rfc8785
+
 from mpp import Challenge, Credential
+from mpp._parsing import assert_not_legacy_unicode_escaped
 from mpp._typing import is_dict, is_list
-from mpp.errors import PaymentExpiredError, PaymentOutcomeUnknownError
+from mpp.errors import (
+    PaymentExpiredError,
+    PaymentOutcomeUnknownError,
+    ZoneSettlementPendingError,
+    ZoneWithdrawalBouncedError,
+)
 from mpp.methods.tempo import _machine_token
+from mpp.methods.tempo import _zone as _zones
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
@@ -34,6 +44,7 @@ from mpp.methods.tempo._defaults import (
     rpc_url_for_chain,
 )
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
+from mpp.methods.tempo._simulation import simulation_error
 from mpp.methods.tempo.fee_payer_policy import (
     MIN_REMAINING_VALIDITY_SECONDS,
     _get_payer_policy,
@@ -68,6 +79,7 @@ FEE_PAYER_VALID_BEFORE_SECS = EXPIRING_NONCE_VALID_BEFORE_SECS  # Deprecated ali
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
 _CHAIN_ID_UNSET = object()
 _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+_BLOCK_HASH_RE = re.compile(r"0x[a-fA-F0-9]{64}")
 _ATOMIC_AMOUNT_RE = re.compile(r"[0-9]+")
 _CAPS_REQUIRE_CURRENCY_PIN = (
     "Tempo charge max_amount and max_atomic_amount require a currency pin "
@@ -228,6 +240,175 @@ async def _find_auto_swap_calls(
 # ──────────────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True, kw_only=True)
+class Zone:
+    """Pays charges from a Zone balance when a challenge accepts that Zone.
+
+    The client withdraws the charge amount from the Zone to the recipient with
+    a challenge-bound memo, waits for the withdrawal to settle on Tempo, and
+    sends a ``zone`` credential naming the settlement transaction. Challenges
+    that do not accept the Zone, and split payments, are paid on Tempo as usual.
+
+    Attributes:
+        rpc_url: RPC endpoint of the Zone chain.
+        account: Account that holds the Zone balance and signs the withdrawal.
+            Defaults to the charge account (and its ``root_account``).
+        chain_id: Zone chain ID. Read from ``rpc_url`` when omitted.
+        zone_id: Zone ID. Derived from the Zone chain ID when omitted.
+        parent_chain_id: Tempo chain the Zone settles on. Derived from the
+            Zone chain ID when omitted; a Zone ID is only unique per parent
+            chain, so the client pays from the Zone only on this chain.
+        settlement_timeout: Seconds to wait for the withdrawal to settle on
+            Tempo (default: 60). The wait also ends at the challenge expiry.
+            Tempo is always checked once, so 0 checks without waiting.
+        http_client: httpx client every Zone RPC call goes through, owned by
+            the caller. Set the Zone's ``X-Authorization-Token`` header on it.
+    """
+
+    rpc_url: str
+    account: TempoAccount | None = None
+    chain_id: int | None = None
+    zone_id: int | None = None
+    parent_chain_id: int | None = None
+    settlement_timeout: float | None = None
+    http_client: httpx.AsyncClient | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Reject options that would fail only after an irreversible withdrawal."""
+        timeout = self.settlement_timeout
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))  # pyright: ignore[reportUnnecessaryIsInstance]
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            raise ValueError("zone.settlement_timeout must be a finite, non-negative number.")
+        if self.zone_id is not None and not _zones.is_id(self.zone_id):
+            raise ValueError(f"Invalid Zone ID: {self.zone_id!r}")
+        if self.chain_id is not None:
+            _assert_zone_chain(self.zone_id, self.chain_id)
+            _assert_zone_parent_chain(self.parent_chain_id, self.chain_id)
+
+
+def _assert_rpc_chain_id(chain_id: int, expected_chain_id: int | None) -> None:
+    """Reject a Tempo RPC that serves another chain than the client's policy pins."""
+    if expected_chain_id is not None and chain_id != expected_chain_id:
+        raise TransactionError(
+            f"Chain ID mismatch: RPC returned {chain_id}, "
+            f"expected {expected_chain_id} from client policy"
+        )
+
+
+def _assert_zone_chain(zone_id: int | None, chain_id: int) -> None:
+    """Reject a ``zone_id`` that names another Zone than the one its chain ID derives."""
+    # Only chain IDs that follow a known Zone scheme name their Zone.
+    if zone_id is None or _zones.parent_chain_id_from_chain_id(chain_id) is None:
+        return
+    derived = _zones.id_from_chain_id(chain_id)
+    if derived != zone_id:
+        raise ValueError(
+            f"zone.zone_id {zone_id} does not match Zone {derived} of the Zone chain {chain_id}."
+        )
+
+
+def _assert_zone_parent_chain(parent_chain_id: int | None, chain_id: int) -> None:
+    """Reject a ``parent_chain_id`` other than the parent its Zone chain ID derives.
+
+    Selection trusts an explicit parent chain over the derived one, so a
+    contradicting one would withdraw for a Zone on another chain.
+    """
+    derived = _zones.parent_chain_id_from_chain_id(chain_id)
+    if parent_chain_id is not None and derived is not None and derived != parent_chain_id:
+        raise ValueError(
+            f"zone.parent_chain_id {parent_chain_id} does not match parent chain {derived} "
+            f"of the Zone chain {chain_id}."
+        )
+
+
+# Seconds the client allows for sending a Zone withdrawal before it waits for settlement.
+_ZONE_SUBMISSION_MARGIN = 15.0
+# Seconds to look for a withdrawal's receipt on the Zone after its send response fails.
+_ZONE_RECEIPT_RECOVERY_TIMEOUT = 15.0
+# Seconds the first receipt lookup may take even when the recovery budget is spent.
+_ZONE_RECEIPT_FIRST_LOOKUP = 0.5
+# Gas added to the Zone's estimate for the signature, as the Tempo transfer path does.
+_ZONE_GAS_MARGIN = 5_000
+# Seconds a sender tag lookup on the Zone may take once the Challenge expired: a
+# settlement from before the expiry can still be redeemed within the server's grace.
+_ZONE_LATE_TAG_LOOKUP = 5.0
+# Seconds a retry's lookup of a withdrawal's Zone receipt may take before the sender
+# tag derivation falls back to the last known block (at most half its own deadline).
+_ZONE_RECEIPT_REFRESH_TIMEOUT = 2.0
+
+
+@dataclass(frozen=True, slots=True)
+class _ZoneWithdrawal:
+    """A sent Zone withdrawal: its sender tag when the receipt carried it, and what
+    derives it otherwise (mppx ``ZoneWithdrawal``)."""
+
+    # Hash of the Zone block that included the transaction, when its receipt named one.
+    block_hash: str | None
+    sender: str
+    transaction_hash: str
+    # ``None`` when a Zone RPC left the outbox's event out of the receipt.
+    sender_tags: tuple[str, ...] | None
+
+
+@dataclass
+class _ZoneSend:
+    """Whether a Zone withdrawal may have reached the Zone, so retrying could pay twice.
+
+    ``wanted`` and ``on_submission`` are the push path's cancellation tracking:
+    the withdrawal is not sent once every caller is gone, and its signed
+    transaction is reported before it is sent.
+    """
+
+    sent: bool = False
+    raw_tx: str | None = None
+    tx_hash: str | None = None
+    wanted: Callable[[], bool] = lambda: True
+    on_submission: Callable[[str], None] | None = None
+    # First Tempo block its settlement search covered, so later searches start there.
+    search_from: int | None = None
+    # The Challenge the withdrawal pays, so a retry under a newly issued Challenge for
+    # the same payment can resume it instead of withdrawing again.
+    challenge: Challenge | None = None
+    # Origin of the server that issued ``challenge``, or ``None`` when unknown.
+    origin: str | None = None
+    # What ``challenge`` asks to be paid (:func:`_zone_terms`), or ``None`` when it
+    # can't be read, in which case no other Challenge resumes this withdrawal.
+    terms: str | None = None
+    # Whether its credential was returned after its Challenge expired. Only a retry of
+    # that Challenge may get the credential again; until a server accepts it or its
+    # redemption window ends, a Challenge with the same terms fails closed, since the
+    # server may have redeemed or refused it (mppx).
+    redeemed_late: bool = False
+    # Sender tag of a withdrawal whose credential was returned after its Challenge expired.
+    sender_tag: str | None = None
+    # For a withdrawal whose receipt left the outbox's event out: whether a derivation
+    # of its sender tags started (the first uses the send's receipt, later ones look the
+    # receipt up again), and the hash of the last Zone block whose tags were derived,
+    # with those tags. The two are replaced together, only after the new block's tags are
+    # derived, so a failed read keeps the last derived ones. A retry reuses them while the
+    # transaction's receipt still names that block, so it looks the settlement up without
+    # reading the outbox again.
+    derivation_started: bool = False
+    derived_sender_tags: tuple[str, tuple[str, ...]] | None = None
+    # Order in which derivations learned their block: ``observations`` counts the blocks
+    # a receipt named, and ``derived_observation`` is the number of the newest one whose
+    # tags ``derived_sender_tags`` holds or confirmed. A derivation keeps its tags only if
+    # no derivation that learned its block later kept others, so the most recently
+    # observed block wins however the reads interleave.
+    observations: int = 0
+    derived_observation: int = 0
+    # The block a receipt named most recently, with its observation number, kept even
+    # when reading its outbox failed, so a later lookup that proves nothing retries it.
+    observed_block: tuple[str, int] | None = None
+    # IDs of the newly issued Challenges that resumed this withdrawal. A later attempt
+    # for one of them is the same request, even while it waits on the withdrawal itself.
+    resumed_by: set[str] = field(default_factory=lambda: set[str]())
+
+
 @dataclass
 class TempoMethod:
     """Tempo payment method implementation.
@@ -278,6 +459,16 @@ class TempoMethod:
     # caller. Set default headers on it, such as a Tempo API key in
     # ``tempo-api-key``. None opens a client per call.
     http_client: httpx.AsyncClient | None = field(default=None, kw_only=True, repr=False)
+    # Pays from this Zone's balance when a challenge accepts it (``methodDetails.zones``).
+    zone: Zone | None = field(default=None, kw_only=True)
+    # Zone withdrawals by challenge, kept after a failed wait so a retry resumes
+    # waiting instead of withdrawing again.
+    _zone_withdrawals: dict[str, tuple[asyncio.Task[_ZoneWithdrawal], _ZoneSend]] = field(
+        default_factory=dict[str, tuple[asyncio.Task[_ZoneWithdrawal], _ZoneSend]],
+        init=False,
+        repr=False,
+    )
+    _zone_chain_id: int | None = field(default=None, init=False, repr=False)
     _cached_chain_ids: dict[str, int] = field(
         default_factory=dict[str, int], init=False, repr=False
     )
@@ -621,7 +812,9 @@ class TempoMethod:
             return self.rpc_url
         return rpc_url_for_chain(chain_id)
 
-    async def create_credential(self, challenge: Challenge) -> Credential:
+    async def create_credential(
+        self, challenge: Challenge, *, origin: str | None = None
+    ) -> Credential:
         """Create a credential to satisfy the given challenge.
 
         For the charge intent, this builds and signs a TempoTransaction (type 0x76)
@@ -635,6 +828,10 @@ class TempoMethod:
 
         Args:
             challenge: The payment challenge from the server.
+            origin: Origin of the server that issued ``challenge`` (such as
+                ``"https://api.example.com"``), or ``None`` when unknown. A newly issued
+                Challenge resumes a Zone withdrawal already paying the same terms only
+                when it comes from the origin that issued the withdrawal's Challenge.
 
         Returns:
             A credential with the signed transaction.
@@ -645,6 +842,7 @@ class TempoMethod:
                 ``expected_recipients`` policy.
             TransactionError: If transaction building fails.
         """
+        assert_not_legacy_unicode_escaped(challenge)
         if self.account is None:
             raise ValueError("No account configured for signing")
 
@@ -654,7 +852,8 @@ class TempoMethod:
         self._check_charge_policy(challenge.request, await self._resolve_expected_chain_id())
 
         # Share an in-flight signing so concurrent calls for one challenge cannot
-        # yield two independently settleable transactions.
+        # yield two independently settleable transactions. The key leaves out
+        # ``origin``: calls for one Challenge from two origins must not each pay it.
         key = ((self.root_account or self.account.address).lower(), challenge.id)
         attempt = self._signing.get(key)
         if attempt is None:
@@ -664,6 +863,7 @@ class TempoMethod:
                     challenge,
                     wanted=lambda: self._signing_waiters.get(key, 0) > 0,
                     on_submission=submitted.append,
+                    origin=origin,
                 )
             )
             self._signing[key] = (task, submitted)
@@ -700,6 +900,7 @@ class TempoMethod:
         challenge: Challenge,
         wanted: Callable[[], bool] = lambda: True,
         on_submission: Callable[[str], None] | None = None,
+        origin: str | None = None,
     ) -> Credential:
         if self.account is None:
             raise ValueError("No account configured for signing")
@@ -735,6 +936,27 @@ class TempoMethod:
                 payload={"type": "proof", "signature": signature},
                 source=proof_source(source_address, expected_chain_id),
             )
+
+        if self.zone is not None:
+            zone_id = await self._zone_payment(challenge, expected_chain_id)
+            if zone_id is not None:
+                # The settlement is read from this Tempo RPC, so confirm it serves the
+                # pinned chain before withdrawing, as the Tempo path does before signing.
+                _assert_rpc_chain_id(
+                    await self._get_chain_id(self._rpc_url_for(request)), expected_chain_id
+                )
+                return await self._create_zone_credential(
+                    challenge,
+                    zone_id,
+                    origin=origin,
+                    wanted=wanted,
+                    on_submission=on_submission,
+                )
+
+        # Only a Zone withdrawal already started may still be redeemed after expiry
+        # (resumed above); never start a new payment for an expired challenge.
+        if _zone_challenge_expired(challenge.expires):
+            raise PaymentExpiredError(challenge.expires or "")
 
         mode = self._resolve_mode(method_details)
         use_fee_payer = (
@@ -822,7 +1044,7 @@ class TempoMethod:
         from mpp.methods.tempo import _rlp as rlp
 
         payload = credential.payload
-        if payload.get("type") == "hash":
+        if payload.get("type") in ("hash", "zone"):
             tx_hash = payload.get("hash")
             return tx_hash if isinstance(tx_hash, str) else None
         raw_tx = payload.get("signature")
@@ -967,15 +1189,14 @@ class TempoMethod:
                 raise TransactionError("RPC gas-price quote exceeds payer fee policy")
             max_priority_fee_per_gas = min(gas_price, payer_policy.max_priority_fee_per_gas)
 
-        if expected_chain_id is not None and chain_id != expected_chain_id:
-            raise TransactionError(
-                f"Chain ID mismatch: RPC returned {chain_id}, "
-                f"expected {expected_chain_id} from client policy"
-            )
+        _assert_rpc_chain_id(chain_id, expected_chain_id)
 
         if awaiting_fee_payer:
             # Keep sponsored envelopes inside the server's default policy.
             max_priority_fee_per_gas = min(gas_price, get_policy(chain_id).max_priority_fee_per_gas)
+
+        # Name the signing access key so the node checks its spending limits, as viem does.
+        key_id = self.account.address if self.root_account else None
 
         async def estimate_gas_limit(calls: tuple[Call, ...], swapping: bool) -> int:
             gas_limit = DEFAULT_GAS_LIMIT
@@ -990,12 +1211,12 @@ class TempoMethod:
                         }
                         for c in calls
                     ]
+                    request: dict[str, Any] = {"from": sender, "calls": batch}
+                    if key_id is not None:
+                        request["keyId"] = key_id
                     estimated = int(
                         await _rpc_call(
-                            resolved_rpc,
-                            "eth_estimateGas",
-                            [{"from": sender, "calls": batch}, "latest"],
-                            **self._rpc,
+                            resolved_rpc, "eth_estimateGas", [request, "latest"], **self._rpc
                         ),
                         16,
                     )
@@ -1004,16 +1225,26 @@ class TempoMethod:
                     total_estimated = 0
                     for c in calls:
                         total_estimated += await estimate_gas(
-                            resolved_rpc, sender, currency, c.data.hex(), **self._rpc
+                            resolved_rpc, sender, currency, c.data.hex(), key_id=key_id, **self._rpc
                         )
                     gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls))
                 elif gas_estimate_data is not None:
                     estimated = await estimate_gas(
-                        resolved_rpc, sender, currency, gas_estimate_data, **self._rpc
+                        resolved_rpc,
+                        sender,
+                        currency,
+                        gas_estimate_data,
+                        key_id=key_id,
+                        **self._rpc,
                     )
                     gas_limit = max(gas_limit, estimated + 5_000)
-            except Exception:
-                pass
+            except Exception as error:
+                # The estimate simulates the calls as the signing key. A spending-limit or
+                # balance revert there would also revert on chain, at the fee payer's cost when
+                # sponsored, so stop before signing (mppx#1293). Other failures keep the default.
+                mapped = simulation_error(error, account=sender, access_key=key_id)
+                if mapped is not None:
+                    raise mapped from error
             return gas_limit
 
         def fee_requirement(gas_limit: int) -> int:
@@ -1205,6 +1436,697 @@ class TempoMethod:
 
         return "0x" + signed_tx.encode().hex(), chain_id
 
+    async def _get_zone_chain_id(self, zone: Zone) -> int:
+        """Return the Zone's chain ID: configured, or read once from its RPC."""
+        if zone.chain_id is not None:
+            return zone.chain_id
+        if self._zone_chain_id is None:
+            kwargs = {} if zone.http_client is None else {"client": zone.http_client}
+            chain_id = int(await _rpc_call(zone.rpc_url, "eth_chainId", [], **kwargs), 16)
+            _assert_zone_chain(zone.zone_id, chain_id)
+            self._zone_chain_id = chain_id
+        return self._zone_chain_id
+
+    async def _zone_payment(self, challenge: Challenge, chain_id: int | None) -> int | None:
+        """Return the Zone ID to pay a challenge from, or ``None`` to pay on Tempo.
+
+        As mppx, a Zone pays a positive push charge without splits on the Zone's
+        parent chain when the challenge accepts it and the withdrawal can settle
+        before the challenge expires (or is already under way).
+        """
+        zone = self.zone
+        details = challenge.request.get("methodDetails")
+        if zone is None or not is_dict(details) or details.get("zones") is None:
+            return None
+        # Parsed with the server's schema: a malformed field (such as an unknown
+        # mode) fails the whole request there, so it is refused here rather than
+        # read leniently and withdrawn for.
+        parsed = _zones.parse_request(challenge.request).methodDetails
+        accepted = parsed.zones
+        supported = parsed.supportedModes or ["pull", "push"]
+        if "push" not in supported or self.mode not in (None, "push") or parsed.splits:
+            return None
+        # Nothing is withdrawn yet, so a Zone that can't be resolved (its RPC is
+        # down, or its chain names no Zone) leaves the challenge to Tempo.
+        try:
+            zone_chain_id = await self._get_zone_chain_id(zone)
+            zone_id = (
+                zone.zone_id if zone.zone_id is not None else _zones.id_from_chain_id(zone_chain_id)
+            )
+        except Exception:
+            return None
+        # An explicit parent chain that contradicts the Zone chain's own is a
+        # misconfiguration, refused before anything is withdrawn.
+        _assert_zone_parent_chain(zone.parent_chain_id, zone_chain_id)
+        parent_chain_id = (
+            zone.parent_chain_id
+            if zone.parent_chain_id is not None
+            else _zones.parent_chain_id_from_chain_id(zone_chain_id)
+        )
+        if chain_id is None or parent_chain_id != chain_id:
+            return None
+        if not _zones.is_accepted(accepted, zone_id):
+            return None
+        # Servers reject charge credentials for a challenge without an expiry, and a
+        # withdrawal can't be undone, so refuse one before anything is withdrawn.
+        if not challenge.expires:
+            raise ValueError("Challenge has no expiry, so it can't be paid from a Zone.")
+        # A withdrawal can't be undone, so start one only when it can settle before
+        # the challenge expires; an expired challenge would invite another payment.
+        if self._find_zone_withdrawal(
+            challenge, zone_id
+        ) is None and not _zone_settles_before_expiry(challenge.expires, zone.settlement_timeout):
+            return None
+        return zone_id
+
+    def _find_zone_withdrawal(self, challenge: Challenge, zone_id: int) -> str | None:
+        """Return the key of the withdrawal that pays a challenge, if one was started.
+
+        That is the withdrawal for this very Challenge, else one for a Challenge with the
+        same terms (:func:`_zone_terms`) that nobody waits on now: retrying a request gets
+        a newly issued Challenge, and paying that one would withdraw a second time for one
+        payment intent. One that another caller still waits on belongs to that caller's
+        request, so a concurrent request with the same terms pays its own (mppx). An entry
+        stays until a caller takes its credential, so a late retry fails closed instead of
+        paying again. It stops paying other Challenges once its own can no longer be
+        redeemed, and is then dropped.
+
+        Raises:
+            ZoneSettlementPendingError: If a withdrawal for these terms returned its
+                credential after its Challenge expired and that Challenge can still be
+                redeemed: the server may have accepted or refused it, so neither sending it
+                again nor withdrawing again is safe. The error names the Challenge the
+                withdrawal paid, whose retry gets its credential.
+        """
+        key = _zone_withdrawal_key(challenge)
+        if key in self._zone_withdrawals:
+            return key
+        terms = _zone_terms(challenge, zone_id)
+        if terms is None:
+            return None
+        for earlier_key, (task, state) in list(self._zone_withdrawals.items()):
+            if state.terms != terms:
+                continue
+            earlier = state.challenge
+            # No server accepts its credential any more, so it can't pay this Challenge.
+            if earlier is None or _zone_past_redemption(earlier.expires):
+                del self._zone_withdrawals[earlier_key]
+                continue
+            if state.redeemed_late:
+                raise ZoneSettlementPendingError(
+                    challenge_id=earlier.id,
+                    sender_tags=_zone_sender_tags(task, state),
+                    zone_id=zone_id,
+                    challenge=earlier,
+                    redeemed_late=True,
+                )
+            # A Challenge that resumed it before retries it again: its own attempt
+            # counts as a waiter, so ``wanted`` can't tell it apart.
+            if challenge.id in state.resumed_by:
+                return earlier_key
+            # ``wanted`` is true while any caller still awaits the withdrawal: it is
+            # another payment in flight, not one this Challenge retries.
+            if not state.wanted():
+                return earlier_key
+        return None
+
+    def _late_zone_withdrawal(self, credential: Credential) -> str | None:
+        """Return the key of the kept withdrawal whose credential is ``credential`` and
+        was returned after its Challenge expired, if any."""
+        payload = credential.payload
+        if not isinstance(payload, dict) or payload.get("type") != "zone":
+            return None
+        sender_tag = payload.get("senderTag")
+        for key, (_, state) in self._zone_withdrawals.items():
+            if (
+                state.redeemed_late
+                and state.challenge is not None
+                and state.challenge.id == credential.challenge.id
+                and state.sender_tag == sender_tag
+            ):
+                return key
+        return None
+
+    async def _create_zone_credential(
+        self,
+        challenge: Challenge,
+        zone_id: int,
+        *,
+        origin: str | None = None,
+        wanted: Callable[[], bool] = lambda: True,
+        on_submission: Callable[[str], None] | None = None,
+    ) -> Credential:
+        """Pay a challenge from the Zone and return a ``zone`` credential.
+
+        Requests a withdrawal to the recipient with the challenge-bound memo,
+        then waits for the portal to settle it on Tempo. One payment intent never
+        withdraws twice: concurrent and later calls for one challenge, or for a newly
+        issued challenge with the same terms, resume the withdrawal already started
+        and return a credential for the challenge it pays (mppx).
+
+        A newly issued challenge resumes it only when ``origin``, the origin of the
+        server that issued ``challenge``, is known and is the one that issued the
+        withdrawal's challenge.
+
+        Raises:
+            ZoneSettlementPendingError: If the withdrawal did not settle in time, or a
+                withdrawal already pays these terms and can't be resumed here.
+            ZoneWithdrawalBouncedError: If the withdrawal settled but bounced back
+                to the payer's Zone balance.
+        """
+        assert self.zone is not None
+        key = self._find_zone_withdrawal(challenge, zone_id)
+        if key is None:
+            key = _zone_withdrawal_key(challenge)
+            state = _ZoneSend(
+                wanted=wanted,
+                on_submission=on_submission,
+                challenge=challenge,
+                origin=origin,
+                terms=_zone_terms(challenge, zone_id),
+            )
+            # Stored before anything is sent, so concurrent calls share it.
+            new_task = asyncio.ensure_future(self._request_zone_withdrawal(challenge, state))
+            self._zone_withdrawals[key] = (new_task, state)
+            new_key = key
+
+            def finished(done: asyncio.Task[_ZoneWithdrawal]) -> None:
+                # Only a failure before the transaction was sent is safe to retry,
+                # cancellation included. After that, the withdrawal may have gone
+                # through, so retries of this payment keep failing.
+                if not (done.cancelled() or done.exception() is not None):
+                    return
+                if state.sent:
+                    return
+                entry = self._zone_withdrawals.get(new_key)
+                if entry is not None and entry[0] is done:
+                    del self._zone_withdrawals[new_key]
+
+            new_task.add_done_callback(finished)
+            task = new_task
+        else:
+            task, state = self._zone_withdrawals[key]
+            earlier = state.challenge
+            assert earlier is not None
+            same = key == _zone_withdrawal_key(challenge)
+            # Only the server that issued the withdrawal's challenge can redeem its
+            # credential, so another (or an unknown) origin never resumes it.
+            if (not same and (origin is None or origin != state.origin)) or (
+                same and origin is not None and state.origin is not None and origin != state.origin
+            ):
+                raise ZoneSettlementPendingError(
+                    challenge_id=earlier.id, zone_id=zone_id, challenge=earlier
+                )
+            # No server redeems its credential any more: fail closed, never withdraw again.
+            if _zone_past_redemption(earlier.expires):
+                raise ZoneSettlementPendingError(
+                    challenge_id=earlier.id,
+                    sender_tags=_zone_sender_tags(task, state),
+                    zone_id=zone_id,
+                    challenge=earlier,
+                )
+            if task.cancelled():
+                # Cancelled after it was sent (it is forgotten otherwise): it may
+                # have paid, so report that rather than withdraw again.
+                raise PaymentOutcomeUnknownError(
+                    earlier,
+                    TransactionError("Zone withdrawal was cancelled after it was sent."),
+                    transaction_hash=state.tx_hash,
+                )
+            if not same:
+                state.resumed_by.add(challenge.id)
+            # Pay with the earlier withdrawal: its credential carries its own Challenge.
+            challenge = earlier
+            previous = state.wanted
+            state.wanted = lambda: previous() or wanted()
+            # A retry resuming a sent withdrawal reports it, so cancelling the
+            # retry's wait still names the transaction that paid.
+            if state.raw_tx is not None and on_submission is not None:
+                on_submission(state.raw_tx)
+        return await self._settle_zone_withdrawal(challenge, zone_id, key, task, state, wanted)
+
+    async def _pin_zone_search_start(
+        self, request: dict[str, Any], state: _ZoneSend, time_left: float | None
+    ) -> None:
+        """Record the first Tempo block a kept withdrawal's settlement search covers,
+        when none is recorded yet: the lookback window before Tempo's latest block.
+
+        The withdrawal was sent before now, so its settlement can't precede that
+        window. A failed read leaves it unrecorded; the read stops at the Challenge's
+        expiry, or after a short bound once it expired.
+        """
+        if state.search_from is not None:
+            return
+        timeout = min(time_left, _ZONE_LATE_TAG_LOOKUP) if time_left else _ZONE_LATE_TAG_LOOKUP
+        try:
+            latest = await asyncio.wait_for(
+                _rpc_call(self._rpc_url_for(request), "eth_blockNumber", [], **self._rpc),
+                timeout=timeout,
+            )
+            block = int(latest, 16)
+        except Exception:
+            return
+        if state.search_from is None:
+            state.search_from = max(block - _zones.LOOKBACK_BLOCKS, 0)
+
+    async def _derive_zone_sender_tags(
+        self, withdrawal: _ZoneWithdrawal, state: _ZoneSend, deadline: float
+    ) -> tuple[str, ...]:
+        """The sender tags a withdrawal whose receipt had no event may carry, derived
+        from the state of the Zone block that includes it (mpp-rs ``derived_sender_tags``).
+
+        A retry looks the transaction's receipt up again first: if the Zone moved it to
+        another block, as after a reorg, the tags come from that block, and replace the
+        tags derived from the earlier one once they are derived. A lookup that proves
+        nothing retries the newest block a receipt named if its tags weren't derived,
+        falling back to the last derived ones, and otherwise keeps those. The lookup stops well before the
+        derivation's ``deadline``, so a stalled one never keeps a retry from the tags
+        already derived for that block. The outbox reads are pinned to that block's hash
+        and its parent's.
+
+        Each derivation that learns its block from a receipt takes the next observation
+        number. Its tags are kept only if no derivation that observed a block later kept
+        others, so an older block derived last never replaces a newer one, and a newer
+        block derived last still replaces an older one.
+
+        Raises:
+            SenderTagUnderivableError: If no receipt named a block, or the block's
+                outbox state names no withdrawal for the transaction.
+        """
+        assert self.zone is not None
+        zone = self.zone
+        rpc: dict[str, Any] = {} if zone.http_client is None else {"client": zone.http_client}
+        # 0 for a block no receipt proved (a lookup that proved nothing): kept only when
+        # no tags were derived yet.
+        observation = 0
+        # Tags to fall back to when retrying an observed block whose outbox read failed.
+        fallback: tuple[str, tuple[str, ...]] | None = None
+        started = asyncio.get_running_loop().time()
+        if not state.derivation_started:
+            # The first derivation uses the receipt the send returned.
+            state.derivation_started = True
+            block_hash = withdrawal.block_hash
+            if block_hash is not None:
+                state.observations += 1
+                observation = state.observations
+                state.observed_block = (block_hash, observation)
+        else:
+            try:
+                receipt = await asyncio.wait_for(
+                    _rpc_call(
+                        zone.rpc_url,
+                        "eth_getTransactionReceipt",
+                        [withdrawal.transaction_hash],
+                        **rpc,
+                    ),
+                    timeout=min(_ZONE_RECEIPT_REFRESH_TIMEOUT, deadline / 2),
+                )
+            except Exception:
+                receipt = None
+            included = _zone_included_block(receipt, withdrawal.transaction_hash)
+            if included is not None:
+                state.observations += 1
+                observation = state.observations
+                block_hash = included
+                state.observed_block = (block_hash, observation)
+            else:
+                # Read after the lookup, so a block a concurrent retry derived meanwhile
+                # wins.
+                derived = state.derived_sender_tags
+                observed = state.observed_block
+                if observed is not None and observed[1] > state.derived_observation:
+                    # A receipt named a newer block whose outbox read failed: retry it,
+                    # keeping the last derived tags if this read fails too.
+                    block_hash, observation = observed
+                    fallback = derived
+                else:
+                    block_hash = derived[0] if derived is not None else withdrawal.block_hash
+        if block_hash is None:
+            raise _zones.SenderTagUnderivableError(
+                f"Zone withdrawal transaction {withdrawal.transaction_hash} has no block."
+            )
+        derived = state.derived_sender_tags
+        if derived is not None and derived[0] == block_hash:
+            # A newer observation of the kept block: an older derivation of another block
+            # still reading must not replace it.
+            state.derived_observation = max(state.derived_observation, observation)
+            return derived[1]
+        read = _zones.sender_tag_candidates(
+            zone.rpc_url,
+            block_hash=block_hash,
+            sender=withdrawal.sender,
+            transaction_hash=withdrawal.transaction_hash,
+            client=zone.http_client,
+        )
+        if fallback is None:
+            tags = await read
+        else:
+            # Bounded so a stalled read still leaves time to use the fallback tags.
+            elapsed = asyncio.get_running_loop().time() - started
+            try:
+                tags = await asyncio.wait_for(read, timeout=max((deadline - elapsed) / 2, 0))
+            except Exception:
+                return fallback[1]
+        # Kept only if no derivation that observed its block later kept others.
+        if state.derived_sender_tags is None or observation > state.derived_observation:
+            state.derived_sender_tags = (block_hash, tags)
+            state.derived_observation = observation
+        return tags
+
+    async def _settle_zone_withdrawal(
+        self,
+        challenge: Challenge,
+        zone_id: int,
+        key: str,
+        task: asyncio.Task[_ZoneWithdrawal],
+        state: _ZoneSend,
+        wanted: Callable[[], bool],
+    ) -> Credential:
+        """Wait for a sent Zone withdrawal to settle and return its credential."""
+        assert self.zone is not None
+        zone = self.zone
+        request = challenge.request
+        withdrawal = await asyncio.shield(task)
+        # The tag a late credential carried, else the tag the receipt carried.
+        sender_tags = (state.sender_tag,) if state.sender_tag else withdrawal.sender_tags
+        if not sender_tags:
+            # Derived until a read succeeds, then kept while the transaction stays in the
+            # same block. A failed or slow read on the Zone is resumable: the withdrawal
+            # stays kept for this Challenge, so a retry reads again without withdrawing
+            # again. The read stops at the Challenge's expiry, or after a short bound once
+            # it expired, since a settlement from before the expiry can still be redeemed
+            # within the server's grace.
+            #
+            # Where the settlement search starts is pinned first, while Tempo's tip is
+            # still close to when the withdrawal was sent: a derivation that takes long
+            # would otherwise move the search's lookback window past a settlement made
+            # in the meantime. Retries keep the first pinned start.
+            await self._pin_zone_search_start(request, state, _zone_time_left(challenge.expires))
+            time_left = _zone_time_left(challenge.expires)
+            deadline = time_left if time_left else _ZONE_LATE_TAG_LOOKUP
+            try:
+                sender_tags = await asyncio.wait_for(
+                    self._derive_zone_sender_tags(withdrawal, state, deadline),
+                    timeout=deadline,
+                )
+            except _zones.SenderTagUnderivableError as refusal:
+                # The Zone's outbox state is fixed, so every retry would be refused the
+                # same way: report the sent withdrawal by its hash to reconcile instead.
+                # The refusal says why (no block, no withdrawal, or too many candidates).
+                refused = TransactionError(
+                    f"Zone withdrawal transaction {withdrawal.transaction_hash} was sent, but "
+                    f"its sender tag can't be derived: {refusal}"
+                )
+                refused.__cause__ = refusal
+                raise PaymentOutcomeUnknownError(
+                    challenge, refused, transaction_hash=withdrawal.transaction_hash
+                ) from refusal
+            except Exception as cause:
+                # A transient read failure. Pin where the settlement search starts now if
+                # the read before the derivation failed, so a retry that reads the tags
+                # much later still covers a settlement that happened in between.
+                await self._pin_zone_search_start(request, state, time_left)
+                failure = TransactionError(
+                    f"Zone withdrawal transaction {withdrawal.transaction_hash} was sent, but "
+                    "its sender tag could not be read from the Zone."
+                )
+                failure.__cause__ = cause
+                raise ZoneSettlementPendingError(
+                    challenge_id=challenge.id, zone_id=zone_id, challenge=challenge
+                ) from failure
+
+        def searched_from(block: int) -> None:
+            if state.search_from is None:
+                state.search_from = block
+
+        # Wait until the Challenge expires at most. After that, look once: only a
+        # settlement from before the expiry can still be redeemed.
+        expired = _zone_challenge_expired(challenge.expires)
+        try:
+            settlement, sender_tag = await _zones.wait_for_settled_withdrawal(
+                self._rpc_url_for(request),
+                portal=_zones.portal_address(zone_id),
+                sender_tags=sender_tags,
+                to=request["recipient"],
+                timeout=0.0
+                if expired
+                else _zone_settlement_timeout(challenge.expires, zone.settlement_timeout),
+                first_scan_limit=None if expired else _zone_time_left(challenge.expires),
+                from_block=state.search_from,
+                on_search_start=searched_from,
+                **self._rpc,
+            )
+        except Exception as cause:
+            raise ZoneSettlementPendingError(
+                challenge_id=challenge.id,
+                sender_tags=sender_tags,
+                zone_id=zone_id,
+                challenge=challenge,
+            ) from cause
+        entry = self._zone_withdrawals.get(key)
+        if not settlement.callback_success:
+            # The withdrawal bounced back to the payer's Zone balance and paid
+            # nothing, so forget it: paying again withdraws again (mpp-rs
+            # ``ZoneWithdrawalBounced``). The server would reject its credential.
+            if entry is not None and entry[0] is task:
+                del self._zone_withdrawals[key]
+            raise ZoneWithdrawalBouncedError(
+                challenge_id=challenge.id,
+                sender_tag=sender_tag,
+                zone_id=zone_id,
+                challenge=challenge,
+            )
+        # Forget the withdrawal once a caller takes its credential: it pays once, so a
+        # later Challenge with the same terms is a new payment. One taken after its
+        # Challenge expired is accepted only by a server that grants a grace, so it stays
+        # for a retry of its own Challenge, which would otherwise pay again on Tempo, and
+        # blocks other Challenges with its terms until a server accepts it or its
+        # redemption window ends.
+        # With every caller gone, it stays too, so a retry finds it settled instead of
+        # withdrawing again.
+        if entry is not None and entry[0] is task and wanted():
+            if _zone_challenge_expired(challenge.expires):
+                state.redeemed_late = True
+                state.sender_tag = sender_tag
+            else:
+                del self._zone_withdrawals[key]
+        return Credential(
+            challenge=challenge.to_echo(),
+            payload={
+                "hash": settlement.transaction_hash,
+                "senderTag": sender_tag,
+                "type": "zone",
+                "zoneId": zone_id,
+            },
+        )
+
+    async def _request_zone_withdrawal(
+        self, challenge: Challenge, state: _ZoneSend
+    ) -> _ZoneWithdrawal:
+        """Withdraw the challenge amount from the Zone to its recipient and return it sent.
+
+        The withdrawal carries the challenge-bound memo. Its bounce refunds the
+        payer, not the payee's Zone address. It has its sender tag when the receipt
+        carries the outbox's ``WithdrawalRequested`` event, and leaves it to be derived
+        when the Zone RPC redacts that event.
+        """
+        # pytempo ships no type information.
+        from eth_abi.abi import decode, encode
+        from eth_hash.auto import keccak
+        from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
+
+        from mpp.methods.tempo.intents import APPROVE_SELECTOR
+
+        assert self.zone is not None
+        zone = self.zone
+        account = zone.account or self.account
+        if account is None:
+            raise ValueError("Zone payments require an account.")
+        root_account = self.root_account if zone.account is None else None
+        sender = root_account or account.address
+        request = challenge.request
+        amount = int(request["amount"])
+        currency = request["currency"]
+        recipient = request["recipient"]
+        memo = encode_attribution(
+            challenge_id=challenge.id, server_id=challenge.realm, client_id=self.client_id
+        )
+        rpc_url = zone.rpc_url
+        rpc: dict[str, Any] = {} if zone.http_client is None else {"client": zone.http_client}
+        chain_id = await self._get_zone_chain_id(zone)
+
+        # The outbox pulls the amount plus its withdrawal fee.
+        fee_data = "0x" + _zones.CALCULATE_WITHDRAWAL_FEE_SELECTOR + _abi_words(0)
+        fee = int(
+            await _rpc_call(
+                rpc_url, "eth_call", [{"to": _zones.ZONE_OUTBOX, "data": fee_data}, "latest"], **rpc
+            ),
+            16,
+        )
+        # The fee is spent in the charge currency too, so the client's amount caps
+        # bound the whole withdrawal, not just the amount the challenge names.
+        max_atomic, max_token = self._amount_caps()
+        if max_atomic is not None and amount + fee > max_atomic:
+            raise ValueError(
+                "Tempo charge amount plus Zone withdrawal fee exceeds max_atomic_amount."
+            )
+        if max_token is not None and amount + fee > max_token:
+            raise ValueError("Tempo charge amount plus Zone withdrawal fee exceeds max_amount.")
+        approve = "0x" + APPROVE_SELECTOR + _abi_words(_zones.ZONE_OUTBOX, amount + fee)
+        withdrawal = (
+            "0x"
+            + _zones.REQUEST_WITHDRAWAL_SELECTOR
+            + encode(
+                ["address", "address", "uint128", "bytes32", "uint64", "address", "bytes", "bytes"],
+                [currency, recipient, amount, bytes.fromhex(memo[2:]), 0, sender, b"", b""],
+            ).hex()
+        )
+        calls = ((currency, approve), (_zones.ZONE_OUTBOX, withdrawal))
+        gas_limit = (
+            int(
+                await _rpc_call(
+                    rpc_url,
+                    "eth_estimateGas",
+                    [
+                        {
+                            "from": sender,
+                            "calls": [
+                                {"to": to, "value": "0x0", "data": data} for to, data in calls
+                            ],
+                        },
+                        "latest",
+                    ],
+                    **rpc,
+                ),
+                16,
+            )
+            + _ZONE_GAS_MARGIN
+        )
+        gas_price = int(await _rpc_call(rpc_url, "eth_gasPrice", [], **rpc), 16)
+        policy = _get_payer_policy(chain_id, self.payer_fee_policy)
+        if gas_price < 0 or gas_price > policy.max_fee_per_gas:
+            raise TransactionError("RPC gas-price quote exceeds payer fee policy")
+        if gas_limit * gas_price > policy.max_total_fee:
+            raise TransactionError("Transaction exceeds payer total-fee budget")
+        valid_before = _zone_valid_before(challenge.expires, zone.settlement_timeout)
+        if valid_before <= time.time():
+            raise TransactionError(
+                "Challenge expires too soon for a Zone withdrawal to settle; "
+                "request a new challenge"
+            )
+        tx = TempoTransaction.create(
+            chain_id=chain_id,
+            gas_limit=gas_limit,
+            max_fee_per_gas=gas_price,
+            max_priority_fee_per_gas=min(gas_price, policy.max_priority_fee_per_gas),
+            nonce=0,
+            nonce_key=EXPIRING_NONCE_KEY,
+            valid_before=valid_before,
+            calls=tuple(Call.create(to=to, value=0, data=data) for to, data in calls),
+        )
+        # Sign first: a failure until here sent nothing, so the challenge may be retried.
+        if root_account:
+            from pytempo import sign_tx_access_key  # pyright: ignore[reportMissingTypeStubs]
+
+            signed_tx = sign_tx_access_key(tx, account.private_key, root_account)
+        else:
+            signed_tx = tx.sign(account.private_key)
+        raw_tx = "0x" + signed_tx.encode().hex()
+        # The signed transaction fixes its hash, so a lost send response can still be
+        # recovered from the Zone.
+        tx_hash = "0x" + keccak(bytes.fromhex(raw_tx[2:])).hex()
+        # Every caller was cancelled while the withdrawal was prepared: sending
+        # it now would pay with no one left to receive the credential.
+        if not state.wanted():
+            raise asyncio.CancelledError("Zone withdrawal cancelled before submission")
+        state.sent = True
+        state.raw_tx = raw_tx
+        state.tx_hash = tx_hash
+        if state.on_submission is not None:
+            state.on_submission(raw_tx)
+        try:
+            receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw_tx], **rpc)
+        except Exception as cause:
+            # A failure that cannot have reached the Zone moved nothing, so the
+            # challenge may be retried.
+            if _zone_submission_failed(cause):
+                state.sent = False
+                state.raw_tx = None
+                raise TransactionError(f"Zone withdrawal submission failed: {cause}") from cause
+            receipt = await _recover_zone_receipt(
+                rpc_url, tx_hash, rpc, time_left=_zone_time_left(challenge.expires)
+            )
+            if receipt is None:
+                raise PaymentOutcomeUnknownError(
+                    challenge,
+                    TransactionError(
+                        f"Zone withdrawal outcome is unknown: transaction {tx_hash} may have "
+                        "been sent. Retrying this challenge does not withdraw again."
+                    ),
+                    transaction_hash=tx_hash,
+                ) from cause
+        if not is_dict(receipt):
+            raise PaymentOutcomeUnknownError(
+                challenge,
+                TransactionError(f"Zone withdrawal transaction {tx_hash} returned no receipt."),
+                transaction_hash=tx_hash,
+            )
+        receipt_hash = receipt.get("transactionHash")
+        receipt_hash = receipt_hash if isinstance(receipt_hash, str) else tx_hash
+        # A reverted withdrawal moved nothing, so the challenge may be retried.
+        if receipt.get("status") == "0x0":
+            state.sent = False
+            raise TransactionError(f"Zone withdrawal transaction {receipt_hash} reverted.")
+        block_hash = _zone_block_hash(receipt.get("blockHash"))
+        logs = receipt.get("logs")
+        for log in logs if is_list(logs) else []:
+            topics = log.get("topics") if is_dict(log) else None
+            data = log.get("data") if is_dict(log) else None
+            if (
+                not is_list(topics)
+                or len(topics) != 3
+                or not isinstance(topics[0], str)
+                or topics[0].lower() != _zones.WITHDRAWAL_REQUESTED_TOPIC
+                or not isinstance(topics[2], str)
+                or not isinstance(data, str)
+                or str(log.get("address", "")).lower() != _zones.ZONE_OUTBOX
+            ):
+                continue
+            try:
+                fields = decode(list(_zones.REQUESTED_DATA_TYPES), bytes.fromhex(data[2:]))
+            except Exception:
+                continue
+            return _ZoneWithdrawal(
+                block_hash=block_hash,
+                sender=sender,
+                transaction_hash=receipt_hash,
+                sender_tags=(
+                    _zones.sender_tag(
+                        sender="0x" + topics[2][-40:],
+                        transaction_hash=receipt_hash,
+                        fallback_nonce=int(fields[6]),
+                    ),
+                ),
+            )
+        # A Zone RPC that redacts logs leaves the outbox's event out of the payer's
+        # receipt: its sender tag is derived from the outbox's ``lastFallbackNonce``.
+        if block_hash is not None:
+            return _ZoneWithdrawal(
+                block_hash=block_hash,
+                sender=sender,
+                transaction_hash=receipt_hash,
+                sender_tags=None,
+            )
+        # It went through but its sender tag can't be read, so it may still pay.
+        raise PaymentOutcomeUnknownError(
+            challenge,
+            TransactionError(
+                "Zone withdrawal request did not emit WithdrawalRequested, and its receipt "
+                "names no block to derive its sender tag from."
+            ),
+            transaction_hash=receipt_hash,
+        )
+
     def _encode_transfer(self, to: str, amount: int) -> str:
         """Encode a TIP-20 transfer call.
 
@@ -1229,6 +2151,226 @@ class TempoMethod:
         if not all(c in "0123456789abcdefABCDEF" for c in memo_clean):
             raise ValueError("memo must be hex-encoded")
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
+
+
+def _zone_withdrawal_key(challenge: Challenge) -> str:
+    """Key a Zone withdrawal by its whole Challenge, so another realm's or request's
+    challenge with the same ID never matches.
+
+    The unbound description is left out: a header-parsed Challenge reads characters
+    above U+00FF in it as ``uXXXX`` text, so its structured form must match the same key.
+    """
+    return json.dumps(
+        [
+            challenge.id,
+            challenge.realm,
+            challenge.method,
+            challenge.intent,
+            challenge.request,
+            challenge.expires,
+            challenge.digest,
+            challenge.opaque,
+        ],
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _zone_terms(challenge: Challenge, zone_id: int) -> str | None:
+    """Key what a Challenge asks to be paid from a Zone (mppx), or ``None`` when it
+    can't be read.
+
+    The JCS of the Zone ID, realm, method, intent, request, digest and route
+    metadata: the opaque metadata without the issuance nonces (``_mppx_nonce``,
+    ``_mpp_nonce``) and the expiry grace marker (``_mppx_expiry_grace``), keeping
+    ``_mppx_scope``, so another route never matches. The ID
+    and expiry each issuance changes are left out, so a retry's newly issued
+    Challenge for the same payment matches.
+    """
+    opaque = challenge.opaque
+    if opaque is not None and not is_dict(opaque):
+        return None
+    meta = {
+        key: value
+        for key, value in (opaque or {}).items()
+        if key not in ("_mppx_nonce", "_mpp_nonce", "_mppx_expiry_grace")
+    }
+    terms: dict[str, Any] = {
+        "zoneId": zone_id,
+        "realm": challenge.realm,
+        "method": challenge.method,
+        "intent": challenge.intent,
+        "request": challenge.request,
+    }
+    if challenge.digest is not None:
+        terms["digest"] = challenge.digest
+    if meta:
+        terms["meta"] = meta
+    try:
+        return rfc8785.dumps(terms).decode()
+    except Exception:
+        return None
+
+
+def _zone_past_redemption(expires: str | None) -> bool:
+    """Whether a Challenge expired longer ago than any server accepts its credential."""
+    if not expires:
+        return False
+    deadline = _parse_expires(expires) + timedelta(seconds=_zones.REDEMPTION_GRACE)
+    return datetime.now(UTC) >= deadline
+
+
+def _zone_sender_tags(
+    task: asyncio.Task[_ZoneWithdrawal], state: _ZoneSend
+) -> tuple[str, ...] | None:
+    """The sender tags known for a kept withdrawal, or ``None`` when none were read yet.
+
+    The tag its late credential carried comes first, then the tag its receipt carried,
+    then the candidates last derived from the Zone's outbox.
+    """
+    if state.sender_tag:
+        return (state.sender_tag,)
+    if task.done() and not task.cancelled() and task.exception() is None:
+        tags = task.result().sender_tags
+        if tags is not None:
+            return tags
+    derived = state.derived_sender_tags
+    return derived[1] if derived is not None else None
+
+
+def _zone_block_hash(value: object) -> str | None:
+    """A Zone receipt's block hash, lowercase, or ``None`` when it names none."""
+    if not isinstance(value, str) or _BLOCK_HASH_RE.fullmatch(value) is None:
+        return None
+    return value.lower()
+
+
+def _zone_included_block(receipt: object, transaction_hash: str) -> str | None:
+    """The hash of the block that includes ``transaction_hash`` by its successful
+    receipt, or ``None`` when the receipt is for another transaction or shows no
+    success, so it proves nothing about where the withdrawal is."""
+    if not is_dict(receipt):
+        return None
+    hash_ = receipt.get("transactionHash")
+    if (
+        not isinstance(hash_, str)
+        or hash_.lower() != transaction_hash.lower()
+        or receipt.get("status") != "0x1"
+    ):
+        return None
+    return _zone_block_hash(receipt.get("blockHash"))
+
+
+def _zone_challenge_expired(expires: str | None) -> bool:
+    """Whether a Challenge with an expiry has reached it."""
+    return _zone_time_left(expires) == 0
+
+
+def _zone_settles_before_expiry(expires: str | None, settlement_timeout: float | None) -> bool:
+    """Whether a Zone withdrawal can be sent and waited on before ``expires``.
+
+    A challenge without an expiry never qualifies: servers reject its credentials.
+    """
+    if not expires:
+        return False
+    timeout = (
+        _zones.DEFAULT_SETTLEMENT_TIMEOUT if settlement_timeout is None else settlement_timeout
+    )
+    remaining = (_parse_expires(expires) - datetime.now(UTC)).total_seconds()
+    return remaining > timeout + _ZONE_SUBMISSION_MARGIN
+
+
+def _zone_settlement_timeout(expires: str | None, settlement_timeout: float | None) -> float:
+    """Seconds to wait for settlement: ``settlement_timeout``, cut short at ``expires``."""
+    timeout = (
+        _zones.DEFAULT_SETTLEMENT_TIMEOUT if settlement_timeout is None else settlement_timeout
+    )
+    if not expires:
+        return timeout
+    remaining = (_parse_expires(expires) - datetime.now(UTC)).total_seconds()
+    return max(0.0, min(timeout, remaining))
+
+
+def _zone_time_left(expires: str | None) -> float | None:
+    """Seconds left before ``expires`` (0 once it passed), or ``None`` without one."""
+    if not expires:
+        return None
+    return max(0.0, (_parse_expires(expires) - datetime.now(UTC)).total_seconds())
+
+
+def _zone_valid_before(expires: str | None, settlement_timeout: float | None) -> int:
+    """Return a Zone withdrawal's ``valid_before``: late enough to settle and pay.
+
+    A withdrawal included after ``expires`` minus the settlement timeout and
+    submission margin could settle too late for its credential, so the
+    transaction stops being valid then.
+    """
+    if not expires:
+        return _expiring_valid_before(None)
+    timeout = (
+        _zones.DEFAULT_SETTLEMENT_TIMEOUT if settlement_timeout is None else settlement_timeout
+    )
+    cutoff = _parse_expires(expires) - timedelta(seconds=timeout + _ZONE_SUBMISSION_MARGIN)
+    # _expiring_valid_before adds one second to the supplied expiry.
+    return _expiring_valid_before((cutoff - timedelta(seconds=1)).isoformat())
+
+
+def _parse_expires(expires: str) -> datetime:
+    parsed = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _zone_submission_failed(error: Exception) -> bool:
+    """Whether a Zone withdrawal's send failed definitively, before it could pay.
+
+    Classified as the push broadcast does: a definitive JSON-RPC error, or a
+    transport failure before the request was sent (connect, pool). Anything
+    else may have reached the Zone.
+    """
+    import httpx
+
+    from mpp.methods.tempo._rpc import RpcError
+    from mpp.methods.tempo.intents import _is_ambiguous_broadcast_error
+
+    if isinstance(error, RpcError):
+        return not _is_ambiguous_broadcast_error(error.response, resubmitted=True)
+    if isinstance(error, httpx.HTTPError):
+        return not _is_ambiguous_broadcast_error(error)
+    return False
+
+
+async def _recover_zone_receipt(
+    rpc_url: str, tx_hash: str, rpc: dict[str, Any], *, time_left: float | None = None
+) -> dict[str, Any] | None:
+    """Look for a Zone withdrawal's receipt after its send response failed.
+
+    Every request is bounded by what is left of the recovery window, cut short at
+    ``time_left`` (the Challenge's remaining lifetime), so a slow Zone RPC can't
+    stretch recovery past either.
+    """
+    budget = _ZONE_RECEIPT_RECOVERY_TIMEOUT
+    if time_left is not None:
+        budget = min(budget, time_left)
+    deadline = time.monotonic() + budget
+    first = True
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 and not first:
+            return None
+        # The first lookup always runs, briefly bounded even with no time left.
+        timeout = max(remaining, _ZONE_RECEIPT_FIRST_LOOKUP) if first else remaining
+        first = False
+        try:
+            receipt = await asyncio.wait_for(
+                _rpc_call(rpc_url, "eth_getTransactionReceipt", [tx_hash], **rpc), timeout
+            )
+        except Exception:
+            receipt = None
+        if is_dict(receipt):
+            return receipt
+        if time.monotonic() + _zones.POLLING_INTERVAL > deadline:
+            return None
+        await asyncio.sleep(_zones.POLLING_INTERVAL)
 
 
 def _check_recipient_addresses(request: dict[str, Any]) -> None:
@@ -1403,6 +2545,7 @@ def _tempo_method(
     payer_fee_token: str | None = None,
     payer_fee_policy: Mapping[str, int] | None = None,
     http_client: httpx.AsyncClient | None = None,
+    zone: Zone | None = None,
 ) -> TempoMethod:
     """Resolve and validate Tempo charge configuration shared by clients and servers.
 
@@ -1565,6 +2708,7 @@ def _tempo_method(
         payer_fee_token=payer_fee_token,
         payer_fee_policy=payer_fee_policy,
         http_client=http_client,
+        zone=zone,
     )
     if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
         raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
@@ -1594,6 +2738,7 @@ def charge(
     fee_token: str | None = None,
     fee_policy: Mapping[str, int] | None = None,
     http_client: httpx.AsyncClient | None = None,
+    zone: Zone | None = None,
 ) -> ClientMethod:
     """Create the client method that pays Tempo charge challenges.
 
@@ -1633,6 +2778,13 @@ def charge(
     30 seconds: push mode waits on ``eth_sendRawTransactionSync`` for the receipt,
     and httpx's 5 second default can end a payment in ``PaymentOutcomeUnknownError``.
 
+    ``zone`` pays from a Zone balance instead of the account's Tempo balance when
+    a challenge accepts that Zone (``methodDetails.zones``); see :class:`Zone`.
+    If the withdrawal does not settle in time, it raises
+    :class:`~mpp.errors.ZoneSettlementPendingError`; passing its ``challenge`` to
+    the same method's ``create_credential`` resumes the withdrawal instead of
+    paying again, while a new request's fresh challenge would withdraw again.
+
     Example:
         from mpp.client import Mpp
         from mpp.methods.tempo import TempoAccount
@@ -1661,6 +2813,7 @@ def charge(
             payer_fee_token=fee_token,
             payer_fee_policy=fee_policy,
             http_client=http_client,
+            zone=zone,
         )
     )
 
@@ -1671,12 +2824,27 @@ def _client_method(method: TempoMethod) -> ClientMethod:
     Challenges in currencies other than the pinned ones are not selected.
     """
     from mpp.methods.tempo.schemas import charge as definition
-    from mpp.runtime import ClientMethod, CredentialParams
+    from mpp.runtime import AttemptOutcome, ClientMethod, CredentialParams
 
     pinned = {pin.lower() for pin in method._pinned_currencies()}
 
     async def create_credential(params: CredentialParams) -> str:
-        return (await method.create_credential(params.challenge)).to_authorization()
+        origin = _request_origin(params.request)
+        credential = await method.create_credential(params.challenge, origin=origin)
+        attempt = params.attempt
+        if attempt is not None and method._late_zone_withdrawal(credential) is not None:
+            # Same-terms Challenges stay blocked while the outcome is unknown. Once the
+            # server accepts the late credential, the withdrawal has paid once, so the
+            # next Challenge with its terms is a new payment.
+            async def settle(outcome: AttemptOutcome) -> bool:
+                if outcome.status == "accepted":
+                    key = method._late_zone_withdrawal(credential)
+                    if key is not None:
+                        del method._zone_withdrawals[key]
+                return True
+
+            attempt.settle = settle
+        return credential.to_authorization()
 
     def can_handle_challenge(challenge: Challenge) -> bool:
         currency = challenge.request.get("currency")
@@ -1690,6 +2858,25 @@ def _client_method(method: TempoMethod) -> ClientMethod:
         can_handle_challenge=can_handle_challenge,
         transaction_hash=method.transaction_hash,
     )
+
+
+def _request_origin(request: Any) -> str | None:
+    """The origin of the HTTP request that received a challenge, or ``None`` when unknown.
+
+    Over HTTP ``request`` is an ``httpx.Request``; other transports (MCP) pass none.
+    Only an HTTP(S) URL has an origin that tells two servers apart: every other scheme
+    has the opaque origin ``"null"``, so it never counts as known (mppx).
+    """
+    url = getattr(request, "url", None)
+    scheme = getattr(url, "scheme", None)
+    host = getattr(url, "host", None)
+    if not isinstance(scheme, str) or not isinstance(host, str) or not host:
+        return None
+    if scheme.lower() not in ("http", "https"):
+        return None
+    port = getattr(url, "port", None)
+    netloc = f"[{host}]" if ":" in host else host
+    return f"{scheme.lower()}://{netloc.lower()}" + (f":{port}" if isinstance(port, int) else "")
 
 
 def _abi_words(*args: str | int) -> str:

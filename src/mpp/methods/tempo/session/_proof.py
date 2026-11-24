@@ -70,7 +70,8 @@ def verify_proof(
         )
     except Exception:
         return False
-    signer = _recover_canonical(signature, digest)
+    # A proof is checked off-chain only, so either s form is accepted, as in mppx.
+    signer = _recover_canonical(signature, digest, low_s=False)
     return signer is not None and signer.lower() == account.lower()
 
 

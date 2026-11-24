@@ -58,8 +58,13 @@ from mpp.methods.tempo.session.client import (
 )
 from mpp.methods.tempo.session.client._manager import (
     _FetchUse,  # pyright: ignore[reportPrivateUsage]
+    _zero_amount_charge,  # pyright: ignore[reportPrivateUsage]
 )
-from mpp.methods.tempo.session.client._ops import read_optional_address, resolve_escrow
+from mpp.methods.tempo.session.client._ops import (
+    read_optional_address,
+    resolve_escrow,
+    serialize_credential,
+)
 from mpp.methods.tempo.session.client._session import (
     _acknowledges_open,  # pyright: ignore[reportPrivateUsage]
     _matches_open,  # pyright: ignore[reportPrivateUsage]
@@ -710,6 +715,23 @@ class TestPlanCredential:
         assert await _plan(SessionContext(descriptor=descriptor_for())) == "recover"
 
 
+def test_serialize_credential_names_the_funding_payer_for_a_delegated_signer() -> None:
+    payer = "0x" + "99" * 20
+    descriptor = replace(descriptor_for(), payer=payer)
+    payload = VoucherPayload.model_validate(
+        {
+            "channelId": compute_channel_id(descriptor, chain_id=CHAIN_ID),
+            "descriptor": descriptor.to_wire(),
+            "cumulativeAmount": "1",
+            "signature": "0x1234",
+        }
+    )
+    authorization = serialize_credential(make_challenge(), payload, CHAIN_ID, ACCOUNT)
+    assert Credential.from_authorization(authorization).source == (
+        f"did:pkh:eip155:{CHAIN_ID}:{payer}"
+    )
+
+
 class TestReusableChannel:
     async def test_descriptor_must_match_challenge_and_account(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1089,6 +1111,26 @@ class TestSessionMethod:
         assert sorted(int(p["cumulativeAmount"]) for p in payloads) == list(range(100, 1100, 100))
         assert len({p["channelId"] for p in payloads}) == 1
 
+    async def test_legacy_unicode_escaped_challenge_is_refused_before_signing(self) -> None:
+        from mpp.errors import LegacyUnicodeEscapedChallengeError
+        from mpp.runtime import CredentialParams
+
+        header = make_challenge().to_www_authenticate("api.test")
+        legacy = Challenge.from_www_authenticate(
+            header.replace('realm="api.test"', 'realm="caf\\u2014.test"')
+        )
+        store = create_channel_store()
+        updates: list[ChannelEntry] = []
+        method = SessionMethod(
+            account=ACCOUNT, channel_store=store, on_channel_update=updates.append
+        )
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            await method.create_session_credential(legacy)
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            await method.create_credential(CredentialParams(challenge=legacy))
+        assert updates == []
+        assert store.get(KEY) is None
+
     async def test_manual_close_marks_channel_closed(self) -> None:
         store = create_channel_store()
         updates: list[ChannelEntry] = []
@@ -1279,6 +1321,39 @@ class TestManagementHelpers:
             ],
         )
         assert [c.id for c in _session.session_challenges(response)] == [session_challenge.id]
+
+    def test_session_challenges_skip_legacy_unicode_escapes(self) -> None:
+        legacy = make_challenge(challenge_id="legacy").to_www_authenticate("api.test")
+        legacy = legacy.replace('realm="api.test"', 'realm="caf\\u00e9.test"')
+        plain = make_challenge(challenge_id="plain")
+        response = httpx.Response(
+            402,
+            headers=[
+                ("WWW-Authenticate", legacy),
+                ("WWW-Authenticate", plain.to_www_authenticate("api.test")),
+            ],
+        )
+        assert [c.id for c in _session.session_challenges(response)] == ["plain"]
+
+    def test_bootstrap_skips_legacy_unicode_escaped_zero_charge(self) -> None:
+        def zero(challenge_id: str, realm: str) -> str:
+            challenge = Challenge(
+                id=challenge_id, method="tempo", intent="charge", request={"amount": "0"}
+            )
+            return challenge.to_www_authenticate("api.test").replace(
+                'realm="api.test"', f'realm="{realm}"'
+            )
+
+        legacy = zero("legacy", "caf\\u00e9.test")
+        assert (
+            _zero_amount_charge(httpx.Response(402, headers={"WWW-Authenticate": legacy})) is None
+        )
+        response = httpx.Response(
+            402,
+            headers=[("WWW-Authenticate", legacy), ("WWW-Authenticate", zero("plain", "api.test"))],
+        )
+        found = _zero_amount_charge(response)
+        assert found is not None and found.id == "plain"
 
     def test_read_receipt(self) -> None:
         assert _session.read_receipt(httpx.Response(200)) is None
@@ -1481,6 +1556,204 @@ class TestDeferredOpen:
         with pytest.raises(RuntimeError, match="boom"):
             await attempt.settle(AttemptOutcome(status="rejected"))
         assert not store_lock(method.store, f"channel:{KEY}").locked()
+
+
+# ── MCP: an identical Challenge offered again (mppx McpClient, Fetch.ts) ─
+
+
+class _McpSession:
+    """An MCP session that answers each paid call with ``script``'s next result.
+
+    Unpaid calls, and paid ones past the script or scripted ``"refuse"``, get a ``-32042``
+    error offering the same Challenge again.
+    """
+
+    def __init__(self, challenge: Challenge, *script: Any) -> None:
+        self.challenge = challenge
+        self.script = list(script)
+        self.credentials: list[dict[str, Any]] = []
+
+    def error(self) -> Exception:
+        exceptions = pytest.importorskip("mcp.shared.exceptions")
+        types = pytest.importorskip("mcp.types")
+        from mpp.extensions.mcp.types import MCPChallenge
+
+        offered = MCPChallenge.from_core(self.challenge, "api.test", self.challenge.expires)
+        return exceptions.McpError(
+            types.ErrorData(
+                code=-32042, message="Payment Required", data={"challenges": [offered.to_dict()]}
+            )
+        )
+
+    async def call_tool(self, name: str, arguments: Any = None, **kwargs: Any) -> Any:
+        from mpp.extensions.mcp import META_CREDENTIAL
+
+        credential = (kwargs.get("meta") or {}).get(META_CREDENTIAL)
+        if credential is None:
+            raise self.error()
+        self.credentials.append(credential)
+        result = self.script.pop(0) if self.script else "refuse"
+        if result == "refuse":
+            raise self.error()
+        return result
+
+
+class _ToolResult:
+    meta = None
+    content: list[Any] = []
+
+
+def _mcp_client(session: _McpSession, method: SessionMethod, order: Any = None) -> Any:
+    pytest.importorskip("mcp")
+    from mpp.extensions.mcp import McpClient
+
+    return McpClient(
+        session,
+        methods=[method.client_method()],
+        trusted_tempo_realms=["api.test"],
+        order_challenges=order,
+    )
+
+
+class TestMcpSameChallenge:
+    async def test_voucher_is_resent_not_signed_again(self) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        method.store.set(entry_for(cumulative=100))
+        session = _McpSession(make_challenge())
+        client = _mcp_client(session, method)
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium", {})
+
+        # One voucher, sent once per round: the cumulative is raised once, not per refusal.
+        assert len(session.credentials) == 3
+        assert all(c == session.credentials[0] for c in session.credentials)
+        assert session.credentials[0]["payload"]["cumulativeAmount"] == "200"
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 200
+
+    async def test_voucher_resent_then_accepted(self) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        method.store.set(entry_for(cumulative=100))
+        session = _McpSession(make_challenge(), "refuse", _ToolResult())
+
+        await _mcp_client(session, method).call_tool("premium", {})
+
+        assert [c["payload"]["cumulativeAmount"] for c in session.credentials] == ["200", "200"]
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 200
+
+    async def test_deferred_open_is_resent_not_opened_again(self, fake_chain: Calls) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        session = _McpSession(make_challenge(suggested_deposit="1000"))
+        client = _mcp_client(session, method)
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium", {})
+
+        assert len(fake_chain["open"]) == 1
+        assert len(session.credentials) == 3
+        assert all(c == session.credentials[0] for c in session.credentials)
+        # Never accepted: the open is dropped and the scope lock released.
+        assert stored(method) is None
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+
+    async def test_deferred_open_resent_then_accepted(self, fake_chain: Calls) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        session = _McpSession(make_challenge(suggested_deposit="1000"), "refuse", _ToolResult())
+
+        await _mcp_client(session, method).call_tool("premium", {})
+
+        assert len(fake_chain["open"]) == 1
+        first, second = session.credentials
+        assert first == second and first["payload"]["action"] == "open"
+        entry = stored(method)
+        assert entry is not None and entry.channel_id == first["payload"]["channelId"]
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+
+
+class TestMcpSelectionFailure:
+    """A new round's selection failing still settles the deferred open it answers."""
+
+    @staticmethod
+    def _failing_on_second_call(hook: Callable[[], Awaitable[None]]) -> Any:
+        calls: list[int] = []
+
+        async def order(candidates: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 2:
+                await hook()
+            return candidates
+
+        return order
+
+    @staticmethod
+    async def _pays_again(method: SessionMethod) -> None:
+        # A leaked scope lock would make this payment wait forever.
+        session = _McpSession(make_challenge(suggested_deposit="1000"), _ToolResult())
+        await asyncio.wait_for(_mcp_client(session, method).call_tool("premium", {}), 5)
+        assert session.credentials[0]["payload"]["action"] == "open"
+        assert stored(method) is not None
+
+    async def test_hook_error_settles_and_reports_unknown_outcome(self, fake_chain: Calls) -> None:
+        async def fail() -> None:
+            raise RuntimeError("order hook failed")
+
+        method = SessionMethod(account=ACCOUNT)
+        session = _McpSession(make_challenge(suggested_deposit="1000"))
+        client = _mcp_client(session, method, self._failing_on_second_call(fail))
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium", {})
+
+        # Settled as rejected: the open is dropped and the scope lock released.
+        assert len(session.credentials) == 1
+        assert stored(method) is None
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+        await self._pays_again(method)
+
+    async def test_cancelled_selection_settles_and_propagates(self, fake_chain: Calls) -> None:
+        entered = asyncio.Event()
+
+        async def hang() -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        method = SessionMethod(account=ACCOUNT)
+        session = _McpSession(make_challenge(suggested_deposit="1000"))
+        client = _mcp_client(session, method, self._failing_on_second_call(hang))
+        call = asyncio.ensure_future(client.call_tool("premium", {}))
+        await asyncio.wait_for(entered.wait(), 5)
+
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        assert stored(method) is None
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+        await self._pays_again(method)
+
+    async def test_http_selection_failure_settles_the_open(self, fake_chain: Calls) -> None:
+        async def fail() -> None:
+            raise RuntimeError("order hook failed")
+
+        method = SessionMethod(account=ACCOUNT)
+        server = Server()
+        server.script.append(required(server.challenge))
+        transport = PaymentTransport(
+            methods=[method.client_method()],
+            inner=httpx.MockTransport(server.handler),
+            order_challenges=self._failing_on_second_call(fail),
+        )
+
+        # Over HTTP the open is settled on every exit too, and the hook's error propagates.
+        with pytest.raises(RuntimeError, match="order hook failed"):
+            await get(transport)
+
+        assert stored(method) is None
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+        response = await asyncio.wait_for(get(transport_for(Server(), method)), 5)
+        assert response.status_code == 200
 
 
 class TestTransportCompatibility:

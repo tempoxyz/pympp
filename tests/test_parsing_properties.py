@@ -8,6 +8,7 @@ values survive a serialize/parse roundtrip.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 from datetime import UTC
 from typing import Any
@@ -48,7 +49,10 @@ def assert_only_parse_error(parse: Any, header: str) -> None:
 
 # Strategies -----------------------------------------------------------------
 
-header_text = st.text().filter(lambda value: "\r" not in value and "\n" not in value)
+# Quoted auth-params carry Latin-1 only; characters above it are rejected on format.
+header_text = st.text(st.characters(max_codepoint=0xFF)).filter(
+    lambda value: "\r" not in value and "\n" not in value
+)
 nonempty_header_text = header_text.filter(bool)
 scheme_like_text = st.tuples(
     header_text,
@@ -60,7 +64,7 @@ quoted_field = st.one_of(nonempty_header_text, scheme_like_text)
 rfc3339_datetimes = st.datetimes(timezones=st.just(UTC)).map(
     lambda value: value.isoformat().replace("+00:00", "Z")
 )
-method_ids = st.from_regex(r"\A[a-z][a-z0-9:_-]{0,15}\Z")
+method_ids = st.from_regex(r"\A[a-z]{1,16}\Z")
 json_scalars = st.one_of(
     st.none(), st.booleans(), st.integers(min_value=-(2**63), max_value=2**63), st.text()
 )
@@ -184,7 +188,7 @@ class TestRoundtrip:
         expires=st.none() | rfc3339_datetimes,
         digest=st.none() | quoted_field.map(lambda value: f"sha-256={value}"),
         opaque=st.none() | st.dictionaries(st.text(), st.text(), max_size=3),
-        header=st.sampled_from([None, "Payment-Authorization", "X-Pay"]),
+        header=st.sampled_from([None, "Payment-Authorization"]),
     )
     def test_challenge(
         self,
@@ -433,22 +437,36 @@ class TestEdgeCases:
         parsed = parse_www_authenticate(www_authenticate())
         assert (parsed.intent, parsed.request) == ("charge", {})
 
-    def test_challenge_rejects_invalid_credential_header_name(self) -> None:
-        with pytest.raises(ParseError, match="Invalid HTTP header name"):
-            parse_www_authenticate(www_authenticate(header="Bad Header"))
+    @pytest.mark.parametrize("value", ["Bad Header", "Authorization", "X-Payment", ""])
+    def test_challenge_rejects_unsupported_credential_header(self, value: str) -> None:
+        with pytest.raises(ParseError, match="Unsupported credential header"):
+            parse_www_authenticate(www_authenticate(header=value))
 
-    def test_credential_rejects_invalid_credential_header_name(self) -> None:
-        challenge = {**VALID_PARAMS, "header": "Bad Header"}
+    @pytest.mark.parametrize("value", ["Bad Header", "Authorization", "X-Payment", "", None, 1])
+    def test_credential_rejects_unsupported_credential_header(self, value: Any) -> None:
+        challenge = {**VALID_PARAMS, "header": value}
         header = f"Payment {b64({'challenge': challenge, 'payload': {}})}"
 
-        with pytest.raises(ParseError, match="Invalid HTTP header name"):
+        with pytest.raises(ParseError, match="Unsupported credential header"):
             parse_authorization(header)
 
-    def test_credential_accepts_valid_credential_header_name(self) -> None:
-        challenge = {**VALID_PARAMS, "header": "Payment-Authorization"}
+    def test_list_skips_unsupported_credential_header(self) -> None:
+        unsupported = www_authenticate(id="unsupported", header="Authorization")
+        valid = www_authenticate(id="valid")
+        parsed: list[Challenge] = []
+        for field in _payment_challenges(f"{unsupported}, {valid}"):
+            with contextlib.suppress(ParseError):
+                parsed.append(parse_www_authenticate(field))
+
+        assert [challenge.id for challenge in parsed] == ["valid"]
+
+    @pytest.mark.parametrize("value", ["Payment-Authorization", "payment-authorization"])
+    def test_credential_accepts_valid_credential_header_name(self, value: str) -> None:
+        challenge = {**VALID_PARAMS, "header": value}
         header = f"Payment {b64({'challenge': challenge, 'payload': {}})}"
 
-        assert parse_authorization(header).challenge.header == "Payment-Authorization"
+        # The echoed spelling is kept as-is: the server binds it into the challenge ID.
+        assert parse_authorization(header).challenge.header == value
 
     @pytest.mark.parametrize("status", ["failed", "pending", "SUCCESS", "", None, True])
     def test_receipt_rejects_non_success_status(self, status: Any) -> None:

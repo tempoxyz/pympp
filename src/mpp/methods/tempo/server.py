@@ -16,6 +16,7 @@ Sessions (pay-as-you-go over a TIP-1034 channel) use :func:`session`::
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -66,12 +67,15 @@ def charge(
     on_payment_success: PaymentSuccessHandler | None = None,
     supported_modes: Sequence[ChargeMode] | None = None,
     machine_token_enabled: bool = False,
+    zones: Sequence[int] | Literal[True] | None = None,
+    zone_credential_grace_ms: float = 0,
 ) -> list[ServerMethod]:
     """Create Tempo charge server methods, one per accepted currency in offer order.
 
     Routes take ``amount`` (decimal string), and optionally ``currency``,
     ``recipient``, ``chain_id``, ``fee_payer`` (``False`` stops sponsoring the
-    client's fees), ``splits`` (base units), ``external_id`` and ``supported_modes``.
+    client's fees), ``splits`` (base units), ``external_id``, ``supported_modes``
+    and ``zones``.
     A route naming a ``currency`` offers only that one.
 
     Args:
@@ -117,13 +121,50 @@ def charge(
             holding MACH pay through the canonical first-party swapper, which settles the
             charge currency to the recipient in the same transaction. Routes may override it
             with ``machine_token_enabled``.
+        zones: Zones whose withdrawals may pay a charge, advertised in
+            ``methodDetails.zones``: Zone IDs, or ``True`` for any Zone on the
+            charge's chain. A payer withdraws from its Zone to the recipient with a
+            challenge-bound memo and sends a ``zone`` credential naming the Tempo
+            transaction that settled it. Zone payments are push payments without
+            splits. ``None`` accepts none.
+        zone_credential_grace_ms: Milliseconds after its challenge expires that a
+            ``zone`` credential is still accepted, when its withdrawal settled on Tempo
+            before the expiry (default: 0, at most 300000). A client waiting for a slow
+            settlement can then still redeem it. No other credential gets a grace.
+
+    Raises:
+        ValueError: If ``zone_credential_grace_ms`` is not a finite number from 0 to
+            300000, or is set together with ``relay``.
     """
+    from mpp.methods.tempo._zone import REDEMPTION_GRACE
+
+    if (
+        isinstance(zone_credential_grace_ms, bool)
+        or not isinstance(zone_credential_grace_ms, (int, float))
+        or not math.isfinite(zone_credential_grace_ms)
+        or not 0 <= zone_credential_grace_ms <= REDEMPTION_GRACE * 1000
+    ):
+        raise ValueError(
+            "zone_credential_grace_ms must be a finite number of milliseconds "
+            f"from 0 to {REDEMPTION_GRACE * 1000:g}."
+        )
+    if relay is not None and zone_credential_grace_ms > 0:
+        # The relay verifies credentials itself and doesn't extend their expiry (mppx).
+        raise ValueError("zone_credential_grace_ms is not supported with relay.")
     if supported_modes is not None:
         if isinstance(supported_modes, str) or not supported_modes:
             raise ValueError("supported_modes must be a non-empty sequence of modes")
         for mode in supported_modes:
             if mode not in ("push", "pull"):
                 raise ValueError(f"Invalid Tempo charge mode: {mode!r}")
+    if zones is not None and zones is not True:
+        from mpp.methods.tempo._zone import is_id
+
+        if isinstance(zones, (str, bytes, bool)) or not zones:
+            raise ValueError("zones must be True or a non-empty sequence of Zone IDs")
+        for zone_id in zones:
+            if not is_id(zone_id):
+                raise ValueError(f"Invalid Zone ID: {zone_id!r}")
     local_fee_payer, _ = resolve_fee_payer(fee_payer)
     config = _tempo_method(
         fee_payer=local_fee_payer,
@@ -147,6 +188,7 @@ def charge(
         fee_token=config.fee_token,
         allowed_fee_tokens=config.allowed_fee_tokens,
         sponsor_budget=sponsor_budget,
+        zone_credential_grace=zone_credential_grace_ms / 1000,
     )
     verifier: Any = intent if relay is None else relay.configure(intent)
 
@@ -163,6 +205,8 @@ def charge(
             input.setdefault("supported_modes", list(supported_modes))
         if machine_token_enabled:
             input.setdefault("machine_token_enabled", True)
+        if zones is not None:
+            input.setdefault("zones", True if zones is True else list(zones))
         # Local simulation cannot authorize access keys: keep sponsorship opt-in.
         if fee_payer is None:
             input.pop("fee_payer", None)
@@ -192,6 +236,8 @@ def charge(
             use_store=use_store,
             # The relay consumes credentials itself, so it needs no local replay store.
             _has_store=lambda: relay is not None or intent._store is not None,
+            _credential_grace=intent._credential_grace,
+            _issue_expiry_grace=intent._issue_expiry_grace,
         )
         for accepted in config.currencies
     ]

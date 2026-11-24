@@ -264,7 +264,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [base, tempo, stripe, mcp, evm]
+        profile: [base, tempo, stripe, mcp, evm, tempo-id]
 
     steps:
       - name: Secure runner
@@ -311,6 +311,9 @@ jobs:
               ;;
             evm)
               INSTALL_TARGET="${WHEEL}[evm]"
+              ;;
+            tempo-id)
+              INSTALL_TARGET="${WHEEL}[tempo-id]"
               ;;
           esac
           uv pip install --python .smoke-venv/bin/python "$INSTALL_TARGET"
@@ -377,6 +380,20 @@ jobs:
           assert [m.name for m in server.methods] == ["evm"]
 
           print("evm install smoke test passed")
+          PY
+
+      - name: Smoke test built wheel (tempo-id)
+        if: matrix.profile == 'tempo-id'
+        run: |
+          .smoke-venv/bin/python - <<'PY'
+          from mpp.extensions.identity import tempo
+
+          tempo_id = tempo.server.create(client_id="app_smoke")
+          prover = tempo.client.prover(access_token=lambda: "token", scope="*")
+          assert tempo_id.payment_check.requires[0].type == "tempo-id"
+          assert prover.headers == ("dpop", "tempo-id-token")
+
+          print("tempo-id install smoke test passed")
           PY
 
       - name: Smoke test built wheel (mcp)

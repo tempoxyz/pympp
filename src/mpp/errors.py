@@ -108,6 +108,106 @@ class PaymentOutcomeUnknownError(PaymentError, RuntimeError):
         )
 
 
+class ZoneSettlementPendingError(PaymentError, RuntimeError):
+    """A client withdrew from a Zone to pay a challenge, but the withdrawal did not
+    settle on Tempo before the client stopped waiting.
+
+    The withdrawal cannot be undone and may still settle. Retry with
+    ``challenge``: passing it to the same Tempo charge client method's
+    ``create_credential`` resumes waiting without withdrawing again. A newly
+    issued challenge for the same payment never starts a second withdrawal: from
+    the origin that issued ``challenge_id`` it resumes this withdrawal and returns a
+    credential for that challenge; otherwise it raises this error again.
+    The settlement can also be found by ``sender_tag`` (or one of ``sender_tags``) on
+    the Zone's portal. The error that ended the wait is its ``__cause__``.
+
+    With ``redeemed_late``, the withdrawal settled and its credential was returned
+    after its challenge expired, so the server may still accept or refuse it: only a
+    retry with ``challenge`` gets that credential again, and a new challenge for the
+    same payment raises this error until the redemption window ends.
+    """
+
+    def __init__(
+        self,
+        *,
+        challenge_id: str,
+        sender_tag: str | None = None,
+        zone_id: int,
+        challenge: Any = None,
+        redeemed_late: bool = False,
+        sender_tags: Sequence[str] | None = None,
+    ) -> None:
+        self.challenge = challenge
+        """The pending Challenge (``mpp.Challenge``): retry with it to resume the wait."""
+        self.redeemed_late = redeemed_late
+        """Whether the withdrawal settled and its credential was returned after its
+        challenge expired."""
+        self.challenge_id = challenge_id
+        """ID of the challenge the withdrawal pays."""
+        # A bare string is one tag, not a sequence of characters.
+        if isinstance(sender_tags, str):
+            sender_tags = (sender_tags,)
+        tags = (
+            tuple(sender_tags) if sender_tags is not None else (sender_tag,) if sender_tag else ()
+        )
+        self.sender_tags: tuple[str, ...] = tags
+        """Sender tags the withdrawal may carry: its tag alone when known, else every
+        candidate when a Zone RPC hid it, or none when not yet read."""
+        self.sender_tag = tags[0] if len(tags) == 1 else None
+        """Sender tag of the withdrawal, as the portal's ``WithdrawalProcessed`` event has it,
+        or ``None`` when not yet read or more than one candidate remains (see
+        ``sender_tags``)."""
+        self.zone_id = zone_id
+        """ID of the Zone the withdrawal left."""
+        if len(tags) == 1:
+            withdrawal = f"{tags[0]} "
+        elif tags:
+            withdrawal = f"with sender tag {' or '.join(tags)} "
+        else:
+            withdrawal = ""
+        if redeemed_late:
+            message = (
+                f"Zone {zone_id} withdrawal {withdrawal}for challenge {challenge_id!r} "
+                "settled, and its credential was returned after the challenge expired. "
+                "Retry with this error's challenge to get that credential again instead "
+                "of paying again."
+            )
+        else:
+            message = (
+                f"Zone {zone_id} withdrawal {withdrawal}for challenge {challenge_id!r} has "
+                "not settled on Tempo yet. Retry with this error's challenge to resume "
+                "waiting instead of paying again."
+            )
+        super().__init__(message)
+
+
+class ZoneWithdrawalBouncedError(PaymentError, RuntimeError):
+    """A client withdrew from a Zone to pay a challenge, but the withdrawal bounced.
+
+    The portal processed the withdrawal on Tempo, but its callback failed, so it
+    returned the amount to the payer's Zone balance instead of paying the
+    recipient. The withdrawal fees are spent. Nothing was paid, so no credential
+    was sent; paying the challenge again withdraws again.
+    """
+
+    def __init__(
+        self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None
+    ) -> None:
+        self.challenge = challenge
+        """The Challenge (``mpp.Challenge``) the withdrawal tried to pay."""
+        self.challenge_id = challenge_id
+        """ID of the challenge the withdrawal tried to pay."""
+        self.sender_tag = sender_tag
+        """Sender tag of the withdrawal, as the portal's ``WithdrawalProcessed`` event has it."""
+        self.zone_id = zone_id
+        """ID of the Zone the withdrawal left."""
+        super().__init__(
+            f"Zone {zone_id} withdrawal {sender_tag} for challenge {challenge_id!r} bounced: "
+            "the amount returned to the payer's Zone balance and nothing was paid. "
+            "Paying again withdraws again."
+        )
+
+
 class NoMethodFoundError(PaymentError, ValueError):
     """No configured client method can pay any offered challenge.
 
@@ -128,6 +228,27 @@ class NoMethodFoundError(PaymentError, ValueError):
         available = ", ".join(f"{m.name}.{m.intent}" for m in self.methods)
         super().__init__(
             message or f"No method found for challenges: {offered}. Available: {available}"
+        )
+
+
+class LegacyUnicodeEscapedChallengeError(NoMethodFoundError):
+    """Every payable challenge escaped a bound parameter as \\uXXXX.
+
+    Servers before quoted-pair parsing (RFC 9110) wrote characters above U+00FF that
+    way. Such a value now reads as ``uXXXX``, which the challenge ID does not bind, so
+    the server would reject the credential, possibly after a pushed payment moved funds.
+    Clients refuse these challenges before creating a credential (mppx
+    ``LegacyUnicodeEscapedChallengeError``).
+    """
+
+    def __init__(self, challenges: Sequence[Any] = (), methods: Sequence[Any] = ()) -> None:
+        super().__init__(
+            challenges,
+            methods,
+            message=(
+                "Legacy unicode-escaped challenge: the server escaped a bound parameter "
+                "as \\uXXXX; upgrade the server."
+            ),
         )
 
 
@@ -364,6 +485,52 @@ def _rebuild_payment_simulation_error(
         payment_token=payment_token,
         details=details,
     )
+
+
+class InsufficientBalanceError(PaymentError):
+    """The payer's balance cannot cover the payment.
+
+    Session servers raise it when a channel's available voucher balance cannot cover the
+    requested amount. The Tempo charge client and session open and top-up raise it, with
+    the failed simulation as ``__cause__``, when the gas estimate before signing reverts
+    with the token's ``InsufficientBalance``, as mppx's ``Errors.InsufficientBalanceError``.
+    """
+
+    status = 402
+    type = f"{_BASE_URI}/session/insufficient-balance"
+    title = "Insufficient Balance"
+
+    def __init__(self, reason: str | None = None) -> None:
+        super().__init__(f"Insufficient balance: {reason}." if reason else "Insufficient balance.")
+
+
+class SpendingLimitExceededError(Exception):
+    """The access key that signs a Tempo payment has less spending limit left than it needs.
+
+    The client simulates a payment (estimates its gas as the signing key) before it signs.
+    On chain the transaction would revert with the account keychain's
+    ``SpendingLimitExceeded()`` error, and a fee payer would still pay for it, so the client
+    did not sign it. Raise the key's limit, wait for its period to reset, or pay with another
+    key. The simulation error is ``__cause__``. Matches mppx's
+    ``Errors.SpendingLimitExceededError``.
+    """
+
+    account: str
+    """Account that pays."""
+    access_key: str | None
+    """Access key that signs the payment, when the account pays through an access key."""
+
+    def __init__(self, account: str, access_key: str | None = None) -> None:
+        key = f"key {access_key} of " if access_key else ""
+        super().__init__(
+            f"Access key spending limit exceeded: {key}account {account} cannot pay this "
+            "amount, so the payment was not signed."
+        )
+        self.account = account
+        self.access_key = access_key
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (type(self), (self.account, self.access_key), self.__dict__)
 
 
 class CredentialReplayedError(VerificationError):

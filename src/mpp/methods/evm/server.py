@@ -18,6 +18,7 @@ Usage::
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +28,7 @@ from mpp.methods.evm.client import AuthorizationConfig, _config
 from mpp.methods.evm.intents import ChargeIntent, SettleFn
 from mpp.methods.evm.intents import charge as definition
 from mpp.server.method import ServerMethod, ValidateContext, VerifyContext
-from mpp.x402.facilitator import Facilitator, resolve_facilitator
+from mpp.x402.facilitator import Facilitator, pay_to, resolve_facilitator
 
 if TYPE_CHECKING:
     from mpp import Credential, Receipt
@@ -36,8 +37,34 @@ if TYPE_CHECKING:
     from mpp.methods.evm.assets import EvmAsset
     from mpp.store import Store
     from mpp.x402._server import RouteBinding
+    from mpp.x402.siwx import SiwxOptions
 
-__all__ = ["charge"]
+__all__ = ["charge", "facilitator_pay_to"]
+
+
+async def facilitator_pay_to(
+    facilitator: str | Facilitator, *, network: str, scheme: str = "exact"
+) -> str:
+    """Read the ``payTo`` an x402 facilitator publishes in ``GET /supported``.
+
+    For facilitators that settle into an address of their own
+    (``kinds[].extra.payTo``). Call it once at startup and pass the result as
+    :func:`charge`'s ``recipient``::
+
+        recipient = await facilitator_pay_to(FACILITATOR_URL, network="eip155:8453")
+        method = charge(
+            currency=BASE_USDC,
+            recipient=recipient,
+            facilitator=FACILITATOR_URL,
+            x402_extra={"tempoSettlement": "0x..."},
+        )
+
+    Raises:
+        FacilitatorError: If the facilitator has no ``supported()``, publishes no
+            valid ``payTo`` for the scheme and network, or is a URL that is not
+            ``https://`` (loopback hosts excepted).
+    """
+    return await pay_to(facilitator, network=network, scheme=scheme)
 
 
 def charge(
@@ -53,6 +80,8 @@ def charge(
     route_binding: RouteBinding = "required",
     max_validity_seconds: int = 3600,
     store: Store | None = None,
+    siwx: SiwxOptions | None = None,
+    x402_extra: Mapping[str, Any] | None = None,
     can_offer: CanOfferFn | None = None,
     on_payment_success: PaymentSuccessHandler | None = None,
 ) -> ServerMethod:
@@ -84,6 +113,14 @@ def charge(
             by every worker and replica. Without one (or ``Mpp(store=...)``), claims
             are kept in this process only, which raises in production or on a
             multi-instance platform; pass ``MemoryStore()`` to accept that there.
+        siwx: Optional x402 ``sign-in-with-x`` (SIWX) options
+            (:class:`~mpp.x402.siwx.SiwxOptions`). The x402 402 then offers the
+            ``sign-in-with-x`` extension, and a request with a valid ``SIGN-IN-WITH-X``
+            proof from a wallet ``grant`` approves succeeds without payment, with a
+            ``did:pkh:eip155:<chain>:<address>`` receipt reference.
+        x402_extra: Extra fields added to every x402 payment requirement's
+            ``extra``, for facilitators that read their own keys there. They can't
+            override ``assetTransferMethod``, ``name`` or ``version``.
         can_offer: Optional callback deciding whether to offer a request.
         on_payment_success: Optional callback for this method's payments.
     """
@@ -103,6 +140,8 @@ def charge(
         route_binding=route_binding,
         store=store,
         max_validity_seconds=max_validity_seconds,
+        siwx=siwx,
+        x402_extra=x402_extra,
     )
 
     def use_store(store: Store) -> None:

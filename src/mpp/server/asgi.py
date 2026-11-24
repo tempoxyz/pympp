@@ -17,7 +17,7 @@ from typing import Any, TypeAlias
 import httpx
 
 from mpp.server.compose import ComposedHandler
-from mpp.server.http import PaymentRequired, Request, Response, make_headers
+from mpp.server.http import PaymentRequired, PaymentVerified, Request, Response, make_headers
 
 Scope: TypeAlias = MutableMapping[str, Any]
 Message: TypeAlias = MutableMapping[str, Any]
@@ -165,6 +165,9 @@ class PaymentMiddleware:
             route=self.route,
         )
         result = await self.handler(request)
+        if isinstance(result, PaymentVerified):
+            # Starlette and FastAPI expose it as ``request.state.mpp_identity``.
+            scope.setdefault("state", {})["mpp_identity"] = result.identity
         if isinstance(result, PaymentRequired):
             await _send_response(send, result.challenge)
             return

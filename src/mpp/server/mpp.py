@@ -10,8 +10,15 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, check_secret_key
-from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
+from mpp import (
+    PAYMENT_AUTHORIZATION_HEADER,
+    Challenge,
+    Credential,
+    Receipt,
+    _credential_expiry,
+    check_secret_key,
+)
+from mpp._parsing import _PAYMENT_METHOD_ID_RE, ParseError, _b64_decode, _parse_timestamp
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_mapping
 from mpp._validation import Validation
@@ -32,6 +39,7 @@ from mpp.events import (
     Unsubscribe,
     _SnapshotEventDispatcher,
 )
+from mpp.identity import Route
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.compose import ComposedHandler, SelectOffers, _Offer, _validate_options
 from mpp.server.http import Request
@@ -69,6 +77,20 @@ class HandlerFactory:
     def __init__(self, server: Mpp, methods: Sequence[ServerMethod]) -> None:
         self._server = server
         self.methods = tuple(methods)
+        for method in self.methods:
+            # Mpp checks the methods it is given; a factory built directly may name others.
+            if not _PAYMENT_METHOD_ID_RE.fullmatch(method.name):
+                raise ValueError(
+                    f"Invalid payment method name {method.name!r}: "
+                    "use lowercase letters only (a-z)."
+                )
+            # The intent is bound into the Challenge ID and a quoted-pair can only
+            # carry Latin-1.
+            if any(ord(character) > 0xFF for character in method.intent):
+                raise ValueError(
+                    f"Invalid payment intent {method.intent!r}: "
+                    "use Latin-1 characters only (up to U+00FF)."
+                )
 
     def __call__(self, **options: Any) -> ComposedHandler:
         """Configure the offers of this factory's methods for a route.
@@ -79,15 +101,39 @@ class HandlerFactory:
         other option is method input, merged over the method's ``defaults``.
         """
         options = _validate_options(options)
+        identity = Route.of(options.pop("identity", None))
         methods = _select(self.methods, options)
         for method in methods:
             _check_input(method, options)
+        _check_identity(self._server, methods, identity)
         composed = self._server._compose_implicit or len(methods) > 1
         selection = object() if composed and self._server.select_offers is not None else None
         return ComposedHandler._from_offers(
-            [_Offer(self._server, method, dict(options), selection) for method in methods],
+            [
+                _Offer(self._server, method, dict(options), selection, identity)
+                for method in methods
+            ],
             composed=composed,
         )
+
+
+def _check_identity(server: Mpp, methods: Sequence[ServerMethod], identity: Route) -> None:
+    """Refuse identity a route could not enforce."""
+    # A verifier that reads Authorization would lose its credential to the Payment Credential.
+    if identity.authorization and not server.requires_auth:
+        raise TypeError(
+            "An identity verifier on this route reads Authorization: "
+            "create the server with requires_auth=True."
+        )
+    # Preflight hooks (such as a session bootstrap) issue and settle their own challenges,
+    # which the payment check cannot see.
+    if identity.payment is not None:
+        for method in methods:
+            if method.preflight is not None:
+                raise TypeError(
+                    f"An identity payment check is not supported on {method.name}/"
+                    f"{method.intent} routes with a preflight hook."
+                )
 
 
 class _Namespace:
@@ -214,11 +260,20 @@ class Mpp:
 
         Raises:
             RuntimeError: If a method has no store in a production runtime.
+            ValueError: If a method name is not lowercase letters only, or a method
+                intent or the realm has characters above U+00FF.
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)
         if not self.methods:
             raise ValueError("methods is required")
+        for method in self.methods:
+            # Fail at startup rather than on every 402: challenges can't carry the name.
+            if not _PAYMENT_METHOD_ID_RE.fullmatch(method.name):
+                raise ValueError(
+                    f"Invalid payment method name {method.name!r}: "
+                    "use lowercase letters only (a-z)."
+                )
         if store is not None:
             for method in self.methods:
                 if method.use_store is not None:
@@ -228,6 +283,13 @@ class Mpp:
                 name = method.key.replace("/", ".")
                 check_fallback_allowed(name, f"{name}(store=...) or Mpp(store=...)")
         self.realm = detect_realm() if realm is None else realm
+        # Fail at startup rather than on every 402: the realm is bound into the
+        # Challenge ID and a quoted-pair can only carry Latin-1.
+        if any(ord(character) > 0xFF for character in self.realm):
+            raise ValueError(
+                f"Invalid realm {self.realm!r}: use Latin-1 characters only (up to U+00FF), "
+                "such as the ASCII hostname."
+            )
         self.secret_key = detect_secret_key() if secret_key is None else secret_key
         check_secret_key(self.secret_key)
         self.unique_challenges = unique_challenges
@@ -392,7 +454,7 @@ class Mpp:
             expires = _parse_timestamp(echo.expires)
         except ParseError as error:
             raise PaymentExpiredError(echo.expires) from error
-        if expires.tzinfo is None or expires <= datetime.now(UTC):
+        if expires.tzinfo is None:
             raise PaymentExpiredError(echo.expires)
         if http_request is not None and not _route_scope_matches(http_request, echoed_request):
             raise InvalidChallengeError(echo.id, "credential route does not match")
@@ -453,6 +515,12 @@ class Mpp:
                 expected_scope, echoed_request.get("_mppx_scope"), wire=wire_scope
             ):
                 raise InvalidChallengeError(echo.id, "credential scope does not match")
+        # Checked against the method that matched: only it knows how long after expiry it
+        # accepts the credential, and it checks a late one again itself (mppx).
+        if _credential_expiry.is_expired(
+            expires, datetime.now(UTC), _credential_expiry.grace_of(method, credential)
+        ):
+            raise PaymentExpiredError(echo.expires)
         unsupported = sorted(set(method_options or {}) - set(method.credential_options))
         if unsupported:
             raise TypeError(f"unsupported method option: {unsupported[0]}")
@@ -460,7 +528,7 @@ class Mpp:
         if request is not None or meta is not _CONTEXT_UNSET or body is not _CONTEXT_UNSET:
             expected_meta = None if meta is _CONTEXT_UNSET else meta
             expected_body = None if body is _CONTEXT_UNSET else body
-            if _application_meta(echoed_opaque) != (expected_meta or None):
+            if _application_meta(echoed_opaque) != _application_meta(expected_meta):
                 raise InvalidChallengeError(echo.id, "credential opaque does not match")
             if digest_error := _body_digest_error(echo.digest, expected_body):
                 raise InvalidChallengeError(echo.id, digest_error)

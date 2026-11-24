@@ -48,9 +48,11 @@ module mpp
     CredentialReplayedError -> mpp.errors.CredentialReplayedError
     EventDispatcher -> mpp.events.EventDispatcher
     Expires: module
+    InsufficientBalanceError -> mpp.errors.InsufficientBalanceError
     InternalPaymentError -> mpp.errors.InternalPaymentError
     InvalidChallengeError -> mpp.errors.InvalidChallengeError
     InvalidPayloadError -> mpp.errors.InvalidPayloadError
+    LegacyUnicodeEscapedChallengeError -> mpp.errors.LegacyUnicodeEscapedChallengeError
     MalformedCredentialError -> mpp.errors.MalformedCredentialError
     MemoryStore -> mpp.store.MemoryStore
     Method -> mpp.methods.Method
@@ -85,6 +87,7 @@ module mpp
         @classmethod def from_payment_receipt(cls, header: str) -> Receipt
         @classmethod def success(cls, reference: str, timestamp: datetime | None = None, method: str = 'tempo', external_id: str | None = None, subscription_id: str | None = None, funding_currency: str | None = None) -> Receipt
         def to_payment_receipt(self) -> str
+    SpendingLimitExceededError -> mpp.errors.SpendingLimitExceededError
     Store -> mpp.store.Store
     VerificationFailedError -> mpp.errors.VerificationFailedError
     WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
@@ -120,7 +123,7 @@ module mpp.client
 
 module mpp.client.transport
     class PaymentTransport(httpx.AsyncBaseTransport)
-        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, inner: httpx.AsyncBaseTransport | None = None, events: EventDispatcher | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None) -> None
+        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, inner: httpx.AsyncBaseTransport | None = None, events: EventDispatcher | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None, identity: Sequence[Prover] | None = None) -> None
         async def aclose(self) -> None
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response
         def on(self, name: str, handler: EventHandler) -> Unsubscribe
@@ -129,7 +132,7 @@ module mpp.client.transport
         def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
         def on_payment_response(self, handler: EventHandler) -> Unsubscribe
     class Mpp
-        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None) -> None
+        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None, identity: Sequence[Prover] | None = None) -> None
         async def aclose(self) -> None
         def client(self, **kwargs: Any) -> httpx.AsyncClient
         async def fetch(self, url: str | httpx.URL, *, method: str = 'GET', **kwargs: Any) -> httpx.Response
@@ -189,10 +192,22 @@ module mpp.errors
         def __init__(self, challenge: Any, cause: BaseException, *, credential: Any = None, request: Any = None, transaction_hash: str | None = None) -> None
         title = 'Payment Outcome Unknown'
         type = 'https://paymentauth.org/problems/payment-outcome-unknown'
+    class ZoneSettlementPendingError(mpp.errors.PaymentError, RuntimeError)
+        def __init__(self, *, challenge_id: str, sender_tag: str | None = None, zone_id: int, challenge: Any = None, redeemed_late: bool = False, sender_tags: Sequence[str] | None = None) -> None
+        title = 'Zone Settlement Pending'
+        type = 'https://paymentauth.org/problems/zone-settlement-pending'
+    class ZoneWithdrawalBouncedError(mpp.errors.PaymentError, RuntimeError)
+        def __init__(self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None) -> None
+        title = 'Zone Withdrawal Bounced'
+        type = 'https://paymentauth.org/problems/zone-withdrawal-bounced'
     class NoMethodFoundError(mpp.errors.PaymentError, ValueError)
         def __init__(self, challenges: Sequence[Any] = (), methods: Sequence[Any] = (), *, message: str | None = None) -> None
         title = 'No Method Found'
         type = 'https://paymentauth.org/problems/no-method-found'
+    class LegacyUnicodeEscapedChallengeError(mpp.errors.NoMethodFoundError)
+        def __init__(self, challenges: Sequence[Any] = (), methods: Sequence[Any] = ()) -> None
+        title = 'Legacy Unicode Escaped Challenge'
+        type = 'https://paymentauth.org/problems/legacy-unicode-escaped-challenge'
     class PaymentRequiredError(mpp.errors.PaymentError)
         def __init__(self, realm: str | None = None, description: str | None = None) -> None
         hint = 'Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'
@@ -255,6 +270,15 @@ module mpp.errors
         def __init__(self, message: str = 'Payment verification failed.', *, phase: Literal['sender', 'sponsored'], sender: str | None = None, fee_payer: str | None = None, payment_token: str | None = None, details: dict[str, Any] | None = None) -> None
         title = 'Verification Failed'
         type = 'https://paymentauth.org/problems/verification-failed'
+    class InsufficientBalanceError(mpp.errors.PaymentError)
+        def __init__(self, reason: str | None = None) -> None
+        status = 402
+        title = 'Insufficient Balance'
+        type = 'https://paymentauth.org/problems/session/insufficient-balance'
+    class SpendingLimitExceededError(Exception)
+        account: str
+        access_key: str | None
+        def __init__(self, account: str, access_key: str | None = None) -> None
     class CredentialReplayedError(mpp.errors.VerificationError)
         def __init__(self, reason: str = 'Credential has already been used', *, details: dict[str, Any] | None = None) -> None
         status = 403
@@ -344,6 +368,55 @@ module mpp.events
         def on(self, name: str, handler: AnyEventHandler) -> Unsubscribe
 
 module mpp.extensions
+
+module mpp.extensions.identity
+
+module mpp.extensions.identity.tempo
+    CLOCK_TOLERANCE = 60
+    DEFAULT_CHAIN_ID = 4217
+    ID_TOKEN_HEADER = 'Tempo-Id-Token'
+    ISSUER = 'https://id.tempo.xyz'
+    PROOF_MAX_AGE = 300
+    TYPE = 'tempo-id'
+    class Caller
+        @dataclass(frozen=True, slots=True)
+        field user_id: str
+        field client_id: str
+        field accounts: tuple[str, ...] = ()
+        field compliance: Mapping[str, ComplianceState] = <factory <lambda>>
+        field email: str | None = None
+        field email_verified: bool | None = None
+    ComplianceState = typing.Literal['clear', 'exit_only', 'blocked', 'pending']
+    class Payer(mpp.extensions.identity.tempo.Caller)
+        @dataclass(frozen=True, slots=True)
+        field user_id: str
+        field client_id: str
+        field accounts: tuple[str, ...] = ()
+        field compliance: Mapping[str, ComplianceState] = <factory <lambda>>
+        field email: str | None = None
+        field email_verified: bool | None = None
+        field account: str | None = None
+    client: module
+    server: module
+
+module mpp.extensions.identity.tempo.client
+    class DpopKey
+        @dataclass(frozen=True, slots=True)
+        field private_key: ec.EllipticCurvePrivateKey
+        @classmethod def generate(cls) -> DpopKey
+        property jwk: dict[str, str]
+        def proof(self, access_token: str, method: str, url: str) -> str
+        property thumbprint: str
+    def prover(*, access_token: Callable[[], MaybeAwaitable[str]], scope: Sequence[str] | Literal['*'], dpop: DpopKey | None = None, id_token: Callable[[], MaybeAwaitable[str | None]] | None = None) -> Prover
+
+module mpp.extensions.identity.tempo.server
+    CHALLENGE = (('WWW-Authenticate', 'DPoP algs="ES256", Bearer'),)
+    Allow = collections.abc.Callable[[mpp.extensions.identity.tempo.Caller], bool | collections.abc.Awaitable[bool]]
+    class TempoId
+        @dataclass(frozen=True, slots=True)
+        field verifier: Verifier[Caller]
+        field payment_check: PaymentCheck[Payer]
+    def create(*, client_id: str | Sequence[str] | None = None, store: ExpiringStore | None = None, chain_id: int = 4217, audience: str | None = None, issuer: str = 'https://id.tempo.xyz', allow: Allow | None = None, http: httpx.AsyncClient | None = None) -> TempoId
 
 module mpp.extensions.mcp
     CODE_MALFORMED_CREDENTIAL = -32602
@@ -441,6 +514,106 @@ module mpp.extensions.mcp.verify
     TOOL_ROUTE_PREFIX = 'tool:'
     async def verify_or_challenge(handler: ComposedHandler, *, tool: str, meta: dict[str, Any] | None = None) -> list[MCPChallenge] | tuple[MCPCredential, MCPReceipt]
 
+module mpp.identity
+    _DEFAULT_REASONS: mappingproxy
+    IDENTITY_REQUIRED_HEADER = 'Identity-Required'
+    PRECEDENCE = ('forbidden', 'unavailable', 'invalid', 'missing')
+    REQUEST_HEADERS = ('dpop', 'identity-attestation', 'identity-presentation', 'tempo-id-token')
+    STATUS_CODES: mappingproxy
+    class AnyOf(mpp.identity.Verifier[mpp.identity.AnyOfValue])
+        @dataclass(frozen=True, slots=True)
+        field verify: Callable[[Request], Awaitable[Verification[T]]]
+        field authorization: bool = False
+        field body: bool = False
+        field members: tuple[Verifier[Any], ...] = ()
+    class AnyOfValue
+        @dataclass(frozen=True, slots=True)
+        field index: int
+        field value: Any
+    class PaymentCheck(typing.Generic[~T])
+        @dataclass(frozen=True, slots=True)
+        field requires: tuple[Requirement, ...]
+        field verify: Callable[[PaymentCheckInput], Awaitable[Verification[T]]]
+        field authorization: bool = False
+        field payer: Callable[[T], str | None] | None = None
+        field body: bool = False
+    class PaymentCheckInput
+        @dataclass(frozen=True, slots=True)
+        field request: Request
+        field challenge: Challenge
+        field credential: Credential
+    class PrepareContext
+        @dataclass(frozen=True, slots=True)
+        field challenge: Challenge
+        field requirements: tuple[Requirement, ...]
+    ProverScope = typing.Union[tuple[str, ...], typing.Literal['*']]
+    class ProveContext
+        @dataclass(frozen=True, slots=True)
+        field created: int
+        field nonce: str
+        field challenge: Challenge | None = None
+        @classmethod def new(cls, challenge: Challenge | None = None) -> ProveContext
+    class Prover
+        @dataclass(frozen=True, slots=True)
+        field scope: ProverScope
+        field prove: Callable[[httpx.Request, ProveContext], Awaitable[httpx.Request]]
+        field headers: tuple[str, ...] = ()
+        field prepare: Callable[[httpx.Response, PrepareContext], Awaitable[None]] | None = None
+        field retry: Callable[[httpx.Response, RetryContext], Awaitable[Mapping[str, str] | None]] | None = None
+        def covers(self, url: httpx.URL | str) -> bool
+    class Rejected
+        @dataclass(frozen=True, slots=True)
+        field status: RejectionStatus
+        field reason: str = ''
+        field headers: HeaderPairs = ()
+        property code: int
+    class Rejection
+        @dataclass(frozen=True, slots=True)
+        field stage: Literal['request', 'payment']
+        field status: RejectionStatus
+        field reason: str
+    class RejectionError(Exception)
+        status: Literal['invalid', 'forbidden', 'unavailable']
+        def __init__(self, reason: str, *, status: Literal['invalid', 'forbidden', 'unavailable'] = 'invalid') -> None
+    RejectionStatus = typing.Literal['missing', 'invalid', 'forbidden', 'unavailable']
+    class Requirement
+        @dataclass(frozen=True, slots=True)
+        field type: str
+        field issuer: str | None = None
+    class Results
+        @dataclass(frozen=True, slots=True)
+        field values: Mapping[Verifier[Any] | PaymentCheck[Any], Any] = <factory <lambda>>
+        def get(self, source: Verifier[T] | PaymentCheck[T]) -> T | None
+    class RetryContext
+        @dataclass(frozen=True, slots=True)
+        field request: httpx.Request
+    class Route
+        @dataclass(frozen=True, slots=True)
+        field request: tuple[Verifier[Any], ...] = ()
+        field payment: PaymentCheck[Any] | None = None
+        property authorization: bool
+        property body: bool
+        property empty: bool
+        @classmethod def of(cls, value: Route | Sequence[Verifier[Any]] | None) -> Route
+        property requirements: tuple[Requirement, ...]
+    class Valid(typing.Generic[+T_co])
+        @dataclass(frozen=True, slots=True)
+        field value: T_co
+        field status: Literal['valid'] = 'valid'
+    Verification = typing.Union[mpp.identity.Valid[~T], mpp.identity.Rejected]
+    class Verifier(typing.Generic[~T])
+        @dataclass(frozen=True, slots=True)
+        field verify: Callable[[Request], Awaitable[Verification[T]]]
+        field authorization: bool = False
+        field body: bool = False
+    def any_of(*verifiers: Verifier[Any]) -> AnyOf
+    def forbidden(reason: str = '', headers: HeadersInput = None) -> Rejected
+    def from_fn(verify: Callable[[Request], Awaitable[T | None]], *, challenge: HeadersInput = None, authorization: bool = False, body: bool = False) -> Verifier[T]
+    def invalid(reason: str = '', headers: HeadersInput = None) -> Rejected
+    def missing(reason: str = '', headers: HeadersInput = None) -> Rejected
+    def unavailable(reason: str = '', headers: HeadersInput = None) -> Rejected
+    def with_headers(request: httpx.Request, headers: Mapping[str, str]) -> httpx.Request
+
 module mpp.methods
     CanOfferFn = collections.abc.Callable[[dict[str, typing.Any]], bool | collections.abc.Awaitable[bool]]
     PaymentSuccessHandler = collections.abc.Callable[[mpp.events.ServerPaymentSuccessPayload], None | collections.abc.Awaitable[None]]
@@ -530,7 +703,7 @@ module mpp.methods.evm.intents
         model_config = {'populate_by_name': True, 'extra': 'forbid'}
     charge: mpp.methods.Method
     class ChargeIntent
-        def __init__(self, *, name: str, version: str, facilitator: Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', store: Store | None = None, max_validity_seconds: int = 3600) -> None
+        def __init__(self, *, name: str, version: str, facilitator: Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', store: Store | None = None, max_validity_seconds: int = 3600, siwx: SiwxOptions | None = None, x402_extra: Mapping[str, Any] | None = None) -> None
         async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt
         name = 'charge'
         async def validate(self, credential: Credential, request: dict[str, Any]) -> Validation
@@ -538,7 +711,8 @@ module mpp.methods.evm.intents
         def x402_requirements(self, request: dict[str, Any]) -> PaymentRequirements
 
 module mpp.methods.evm.server
-    def charge(*, currency: EvmAsset | str, recipient: str, chain_id: int | None = None, decimals: int | None = None, authorization: AuthorizationConfig | None = None, facilitator: str | Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', max_validity_seconds: int = 3600, store: Store | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
+    def charge(*, currency: EvmAsset | str, recipient: str, chain_id: int | None = None, decimals: int | None = None, authorization: AuthorizationConfig | None = None, facilitator: str | Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', max_validity_seconds: int = 3600, store: Store | None = None, siwx: SiwxOptions | None = None, x402_extra: Mapping[str, Any] | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
+    async def facilitator_pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact') -> str
 
 module mpp.methods.stripe
     StripeMethod -> mpp.methods.stripe.client.StripeMethod
@@ -751,6 +925,15 @@ module mpp.methods.tempo.client
         field slippage: float = 1
         field fallback: bool = True
         def currencies(self) -> tuple[str, ...]
+    class Zone
+        @dataclass(frozen=True, slots=False)
+        field kw_only rpc_url: str
+        field kw_only account: TempoAccount | None = None
+        field kw_only chain_id: int | None = None
+        field kw_only zone_id: int | None = None
+        field kw_only parent_chain_id: int | None = None
+        field kw_only settlement_timeout: float | None = None
+        field kw_only http_client: httpx.AsyncClient | None = None
     class TempoMethod
         @dataclass(frozen=False, slots=False)
         field name: str = 'tempo'
@@ -776,10 +959,11 @@ module mpp.methods.tempo.client
         field kw_only auto_swap: AutoSwap | None = None
         field kw_only mode: ChargeMode | None = None
         field kw_only http_client: httpx.AsyncClient | None = None
+        field kw_only zone: Zone | None = None
         def can_handle_challenge(self, challenge: Challenge) -> bool
-        async def create_credential(self, challenge: Challenge) -> Credential
+        async def create_credential(self, challenge: Challenge, *, origin: str | None = None) -> Credential
         def transaction_hash(self, credential: Credential) -> str | None
-    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, mode: ChargeMode | None = None, fee_token: str | None = None, fee_policy: Mapping[str, int] | None = None, http_client: httpx.AsyncClient | None = None) -> ClientMethod
+    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, mode: ChargeMode | None = None, fee_token: str | None = None, fee_policy: Mapping[str, int] | None = None, http_client: httpx.AsyncClient | None = None, zone: Zone | None = None) -> ClientMethod
 
 module mpp.methods.tempo.fee_payer_envelope
     FEE_PAYER_ENVELOPE_TYPE_ID = 120
@@ -842,7 +1026,7 @@ module mpp.methods.tempo.intents
         field source: str | None
     ValidateSender = collections.abc.Callable[[mpp.methods.tempo.intents.SenderValidation], bool]
     class ChargeIntent
-        def __init__(self, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, store: Store | None = None, validate_sender: ValidateSender | None = None, confirmation_timeout: float = 30.0, fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None) -> None
+        def __init__(self, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, store: Store | None = None, validate_sender: ValidateSender | None = None, confirmation_timeout: float = 30.0, fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None, zone_credential_grace: float = 0.0) -> None
         async def aclose(self) -> None
         async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt
         name = 'charge'
@@ -882,12 +1066,15 @@ module mpp.methods.tempo.schemas
     FIXED_ATTRIBUTION_MEMO_ERROR = 'Fixed split memos must not use MPP attribution; omit the memo'
     def is_fixed_attribution_memo(memo: object) -> bool
     def reject_fixed_attribution_memos(request: Mapping[str, Any]) -> None
+    ZoneId = typing.Annotated[int, Strict(strict=True), AfterValidator(func=<function _zone_id>)]
+    Zones = typing.Union[typing.Literal[True], typing.Annotated[list[typing.Annotated[int, Strict(strict=True), AfterValidator(func=<function _zone_id>)]], FieldInfo(annotation=NoneType, required=True, metadata=[MinLen(min_length=1)])]]
     class MethodDetails(pydantic.main.BaseModel)
         field chainId: int = 4217
         field feePayer: bool = False
         field machineTokenEnabled: bool | None = None
         field splits: list[mpp.methods.tempo.schemas.Split] | None = None
         field supportedModes: Optional[Annotated[list[Literal['push', 'pull']], FieldInfo(annotation=NoneType, required=True, metadata=[MinLen(min_length=1)])]] = None
+        field zones: Union[Literal[True], Annotated[list[Annotated[int, Strict(strict=True), AfterValidator(func=<function _zone_id>)]], FieldInfo(annotation=NoneType, required=True, metadata=[MinLen(min_length=1)])], NoneType] = None
         model_config = {}
     class ChargeRequest(pydantic.main.BaseModel)
         field amount: str
@@ -909,7 +1096,13 @@ module mpp.methods.tempo.schemas
         field type: Literal['proof']
         field signature: str
         model_config = {}
-    CredentialPayload = mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload | mpp.methods.tempo.schemas.ProofCredentialPayload
+    class ZoneCredentialPayload(pydantic.main.BaseModel)
+        field type: Literal['zone']
+        field hash: str
+        field senderTag: str
+        field zoneId: int
+        model_config = {}
+    CredentialPayload = mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload | mpp.methods.tempo.schemas.ProofCredentialPayload | mpp.methods.tempo.schemas.ZoneCredentialPayload
     class ChargeInput(pydantic.main.BaseModel)
         field amount: str
         field currency: str
@@ -922,15 +1115,16 @@ module mpp.methods.tempo.schemas
         field external_id: str | None = None (alias 'externalId')
         field extra: dict[str, str] | None = None
         field supported_modes: Optional[Annotated[list[Literal['push', 'pull']], FieldInfo(annotation=NoneType, required=True, metadata=[MinLen(min_length=1)])]] = None (alias 'supportedModes')
+        field zones: Union[Literal[True], Annotated[list[Annotated[int, Strict(strict=True), AfterValidator(func=<function _zone_id>)]], FieldInfo(annotation=NoneType, required=True, metadata=[MinLen(min_length=1)])], NoneType] = None
         model_config = {'populate_by_name': True, 'extra': 'forbid'}
     class ChargePayload(pydantic.main.BaseModel, typing.Generic[~RootModelRootType])
-        field root: mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload | mpp.methods.tempo.schemas.ProofCredentialPayload
+        field root: mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload | mpp.methods.tempo.schemas.ProofCredentialPayload | mpp.methods.tempo.schemas.ZoneCredentialPayload
         model_config = {}
     charge: mpp.methods.Method
 
 module mpp.methods.tempo.server
-    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: SponsorBudget | Literal[False] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, supported_modes: Sequence[ChargeMode] | None = None, machine_token_enabled: bool = False) -> list[ServerMethod]
-    def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, top_up_sponsorship_limit: SessionSponsorshipLimit | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, voucher_state_max_age: int = 0, charge_on_acceptance: bool = False, sponsorship_limit: SponsorshipLimit | None = None, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, resolve_channel_id: ResolveSessionChannelId | None = None, bootstrap: bool = False) -> ServerMethod
+    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: SponsorBudget | Literal[False] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, supported_modes: Sequence[ChargeMode] | None = None, machine_token_enabled: bool = False, zones: Sequence[int] | Literal[True] | None = None, zone_credential_grace_ms: float = 0) -> list[ServerMethod]
+    def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, top_up_sponsorship_limit: SessionSponsorshipLimit | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, voucher_state_max_age: int = 0, charge_on_acceptance: bool = False, sponsorship_limit: SponsorshipLimit | None = None, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, resolve_channel_id: ResolveSessionChannelId | None = None, bootstrap: bool = False, configurable_vouchers: bool = False) -> ServerMethod
 
 module mpp.methods.tempo.session
 
@@ -952,6 +1146,30 @@ module mpp.methods.tempo.session.client
         def delete(self, key: str) -> None | Awaitable[None]
         def get(self, key: str) -> ChannelEntry | None | Awaitable[ChannelEntry | None]
         def set(self, entry: ChannelEntry) -> None | Awaitable[None]
+    class ConfigurableAccount
+        def __init__(self, *, address: str, config: ConfigurableAccountConfig, owners: Sequence[OwnerSigner], root_key: OwnerSigner | None = None, previous_configs: Sequence[ConfigurableAccountConfig] = ()) -> None
+        property address: str
+        def channel_signer(self, salt: str, *, root_key: OwnerSigner | None = None) -> ConfigurableAccount | OwnerSigner
+        property commitment: str
+        @classmethod def from_initial_config(cls, config: ConfigurableAccountConfig, owners: Sequence[OwnerSigner]) -> ConfigurableAccount
+        def sign_hash(self, msg_hash: bytes) -> bytes
+    class ConfigurableAccountConfig
+        @dataclass(frozen=True, slots=True)
+        field salt: str
+        field threshold: int
+        field owners: tuple[ConfigurableAccountOwner, ...]
+        field version: int = 0
+        def commitment(self) -> str
+        def derive_address(self) -> str
+        def owner_weight(self, owner: str) -> int | None
+        def to_rlp(self) -> list[Any]
+        def validate(self, account: str | None = None) -> None
+    class ConfigurableAccountOwner
+        @dataclass(frozen=True, slots=True)
+        field owner: str
+        field weight: int
+    class ConfigurableVouchersUnsupportedError(ValueError)
+        def __init__(self, *, signer: str) -> None
     class JsonChannelKv(typing.Protocol)
         def __init__(self, *args, **kwargs)
         def delete(self, key: str) -> None | Awaitable[None]
@@ -989,7 +1207,7 @@ module mpp.methods.tempo.session.client
         field kw_only deposit_raw: str | None = None
         field kw_only auto_swap: bool | AutoSwap | None = None
     class SessionManager
-        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None, bootstrap: bool = False, trusted_tempo_realms: Mapping[str, str] | None = None) -> None
+        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None, bootstrap: bool = False, trusted_tempo_realms: Mapping[str, str] | None = None, voucher_signer: ConfigurableAccount | None = None) -> None
         async def aclose(self) -> None
         property channel: ChannelEntry | None
         property channel_id: str | None
@@ -1002,7 +1220,7 @@ module mpp.methods.tempo.session.client
         property spent: int
         async def top_up(self, amount: str | int) -> SessionReceipt | None
     class SessionMethod
-        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, origin: str | None = None) -> None
+        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, origin: str | None = None, voucher_signer: ConfigurableAccount | None = None) -> None
         def can_handle_challenge(self, challenge: Challenge) -> bool
         def client_method(self) -> ClientMethod
         async def create_credential(self, params: CredentialParams) -> str
@@ -1026,13 +1244,15 @@ module mpp.methods.tempo.session.client
         field kw_only units: int | None = None
         @classmethod def from_wire(cls, value: Any) -> SessionSnapshot
         def to_wire(self) -> dict[str, Any]
+    class SignerConfigChangedError(Exception)
+        def __init__(self, *, signer: str, reason: str, channel_id: str | None = None) -> None
     class UncertainFundingError(Exception)
     def create_channel_store() -> MemoryChannelStore
     def create_json_channel_store(kv: JsonChannelKv) -> JsonChannelStore
     def deserialize_snapshot(value: str) -> SessionSnapshot
     def serialize_snapshot(snapshot: SessionSnapshot) -> str
-    def session(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, origin: str | None = None) -> ClientMethod
-    def session_manager(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None, bootstrap: bool = False, trusted_tempo_realms: Mapping[str, str] | None = None) -> SessionManager
+    def session(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, origin: str | None = None, voucher_signer: ConfigurableAccount | None = None) -> ClientMethod
+    def session_manager(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None, bootstrap: bool = False, trusted_tempo_realms: Mapping[str, str] | None = None, voucher_signer: ConfigurableAccount | None = None) -> SessionManager
 
 module mpp.methods.tempo.session.server
     class ChannelState
@@ -1068,6 +1288,7 @@ module mpp.methods.tempo.session.server
         field kw_only pending_settlement: PendingSettlement | None = None
         field kw_only idempotency_markers: Mapping[str, IdempotencyMarker] | None = None
         field kw_only close_supervised_from_block: int | None = None
+        field kw_only opening_commitment: str | None = None
     class CloseSupervision
         @dataclass(frozen=False, slots=True)
         field block: int
@@ -1165,7 +1386,7 @@ module mpp.methods.tempo.session.server
     def resolve_settleable_voucher(state: ChannelState) -> SignedVoucher | None
     def resolve_settlement_schedule(schedule: SettlementSchedule | None, decimals: int) -> ResolvedSettlementSchedule | None
     def serialize_snapshot(snapshot: SessionSnapshot) -> str
-    def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, top_up_sponsorship_limit: SessionSponsorshipLimit | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, voucher_state_max_age: int = 0, charge_on_acceptance: bool = False, sponsorship_limit: SponsorshipLimit | None = None, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, resolve_channel_id: ResolveSessionChannelId | None = None, bootstrap: bool = False) -> ServerMethod
+    def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, top_up_sponsorship_limit: SessionSponsorshipLimit | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, voucher_state_max_age: int = 0, charge_on_acceptance: bool = False, sponsorship_limit: SponsorshipLimit | None = None, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, resolve_channel_id: ResolveSessionChannelId | None = None, bootstrap: bool = False, configurable_vouchers: bool = False) -> ServerMethod
     async def settle(store: Any, channel_id: str, *, account: TempoAccount, rpc_url: str, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, on_session_settlement: OnSessionSettlement | None = None) -> str
     async def settle_batch(store: Any, channel_ids: Iterable[str], *, account: TempoAccount, rpc_url: str, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, on_session_settlement: OnSessionSettlement | None = None) -> list[str]
     async def supervise_closes(*, channel_ids: Iterable[str] | AsyncIterable[str], store: Any, rpc_url: str, account: TempoAccount | None = None, http_client: httpx.AsyncClient | None = None, chain_id: int | None = None, batch_size: int = 50, close_search_margin_blocks: int = 2000, log_block_range: int = 100000, previous_block: int | None = None, settlement_schedule: ResolvedSettlementSchedule | None = None, candidate_fee_tokens: Sequence[str] | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None) -> CloseSupervision
@@ -1231,7 +1452,7 @@ module mpp.runtime
     class PaymentRuntime
         def __init__(self, methods: Sequence[ClientMethod | Sequence[ClientMethod]] = (), *, events: EventDispatcher | None = None) -> None
         def challenge_candidates(self, challenges: Sequence[Challenge]) -> list[ChallengeCandidate]
-        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None, request: Any = None, fetch: Callable[[Any], Awaitable[Any]] | None = None, attempt: PaymentAttempt | None = None) -> Credential
+        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None, request: Any = None, fetch: Callable[[Any], Awaitable[Any]] | None = None, attempt: PaymentAttempt | None = None, check_expiry: bool = True) -> Credential
         def match_challenge(self, challenges: Sequence[Challenge]) -> tuple[Challenge, ClientMethod]
         async def order_challenges(self, challenges: Sequence[Challenge], order: OrderChallenges | None = None) -> list[ChallengeCandidate]
 
@@ -1299,7 +1520,7 @@ module mpp.server.asgi
 module mpp.server.compose
     BodyType = str | bytes | dict[str, typing.Any]
     BodyParamsType = str | bytes | dict[str, typing.Any] | collections.abc.Callable[[mpp.server.http.Request], str | bytes | dict[str, typing.Any] | collections.abc.Awaitable[str | bytes | dict[str, typing.Any]]] | None
-    ROUTE_OPTION_KEYS = frozenset({'body', 'description', 'expires', 'expires_in', 'meta'})
+    ROUTE_OPTION_KEYS = frozenset({'body', 'description', 'expires', 'expires_in', 'identity', 'meta'})
     MCP_URL_PREFIX = 'mcp:'
     class ComposedChallenges
         @dataclass(frozen=False, slots=False)
@@ -1357,6 +1578,7 @@ module mpp.server.http
     class PaymentRequired
         @dataclass(frozen=True, slots=True)
         field challenge: Response
+        field kw_only rejection: Rejection | None = None
         property status: int
     class PaymentVerified
         @dataclass(frozen=True, slots=True)
@@ -1364,6 +1586,7 @@ module mpp.server.http
         field receipt: Receipt
         field status: Literal[200] = 200
         field kw_only response: Response | None = None
+        field kw_only identity: Results = Results(values=mappingproxy({}))
         def with_receipt(self, response: Any = None) -> Any
     PaymentResult = mpp.server.http.PaymentRequired | mpp.server.http.PaymentVerified
 
@@ -1430,7 +1653,7 @@ module mpp.server.method
         property intent: str
         property key: str
         property name: str
-        async def settle(self, context: VerifyContext) -> tuple[Receipt, Validation | None]
+        async def settle(self, context: VerifyContext, *, before_broadcast: Callable[[Validation], None] | None = None) -> tuple[Receipt, Validation | None]
 
 module mpp.server.mpp
     class HandlerFactory
@@ -1563,6 +1786,16 @@ module mpp.x402
         amount: NotRequired[str]
         errorReason: NotRequired[str]
         errorMessage: NotRequired[str]
+    class SupportedKind(TypedDict)
+        x402Version: int
+        scheme: str
+        network: str
+        extra: NotRequired[dict[str, Any]]
+    class SupportedResponse(TypedDict)
+        kinds: list[SupportedKind]
+        extensions: NotRequired[list[str]]
+        signers: NotRequired[dict[str, list[str]]]
+    SupportsSupported -> mpp.x402.facilitator.SupportsSupported
     class VerifyResponse(TypedDict)
         isValid: bool
         invalidReason: NotRequired[str]
@@ -1600,6 +1833,7 @@ module mpp.x402
     def encode_payment_signature(value: PaymentPayload) -> str
     def is_x402_challenge(challenge: object) -> bool
     def is_x402_credential(credential: Credential) -> bool
+    pay_to -> mpp.x402.facilitator.pay_to
     def payment_required_header(accepts: Iterable[PaymentRequirements], resource_url: str, error: str | None = None, extensions: Mapping[str, Any] | None = None) -> str | None
     def payment_response(response: Any) -> SettleResponse | None
     def payment_response_header(credential: Credential, receipt: Receipt) -> str | None
@@ -1624,11 +1858,82 @@ module mpp.x402.facilitator
         def __init__(self, *args, **kwargs)
         async def settle(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse
         async def verify(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> VerifyResponse
+    class SupportsSupported(typing.Protocol)
+        def __init__(self, *args, **kwargs)
+        async def supported(self) -> SupportedResponse
     class HttpFacilitator
         def __init__(self, url: str, *, headers: HeadersInput = None, create_auth_headers: CreateAuthHeaders | None = None, timeout: float = 30.0, client: httpx.AsyncClient | None = None) -> None
         async def settle(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse
+        async def supported(self) -> SupportedResponse
         async def verify(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> VerifyResponse
+    async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact') -> str
     def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator
 
 module mpp.x402.fastapi
     def payment_middleware(routes: RoutesConfig, server: x402ResourceServer, *, secret_key: str, realm: str | None = None, paywall_config: PaywallConfig | None = None, paywall_provider: PaywallProvider | None = None, store: Store | None = None) -> Middleware
+
+module mpp.x402.siwx
+    EXTENSION_KEY = 'sign-in-with-x'
+    HEADER = 'SIGN-IN-WITH-X'
+    PAYLOAD_JSON_SCHEMA: dict
+    TTL_SECONDS = 300
+    class Chain(TypedDict)
+        chainId: str
+        type: str
+        signatureScheme: NotRequired[str]
+    ErrorCode = typing.Literal['invalid_siwx_payload', 'invalid_siwx_domain_mismatch', 'invalid_siwx_uri_mismatch', 'invalid_siwx_issued_at', 'invalid_siwx_issued_at_too_old', 'invalid_siwx_issued_at_in_future', 'invalid_siwx_expiration_time', 'invalid_siwx_expired', 'invalid_siwx_not_before', 'invalid_siwx_not_yet_valid', 'invalid_siwx_nonce', 'invalid_siwx_signature', 'invalid_siwx_chain_id', 'invalid_siwx_unsupported_chain', 'invalid_siwx_verifier_error']
+    class Extension(TypedDict)
+        info: Info
+        schema: dict[str, Any]
+        supportedChains: list[Chain]
+    class Info(TypedDict)
+        domain: str
+        issuedAt: str
+        nonce: str
+        uri: str
+        version: str
+        expirationTime: NotRequired[str]
+        notBefore: NotRequired[str]
+        requestId: NotRequired[str]
+        resources: NotRequired[list[str]]
+        statement: NotRequired[str]
+    class InvalidProofError(Exception)
+        code: ErrorCode
+        def __init__(self, code: ErrorCode) -> None
+    class Payload(mpp.x402.siwx.Info)
+        domain: str
+        issuedAt: str
+        nonce: str
+        uri: str
+        version: str
+        expirationTime: NotRequired[str]
+        notBefore: NotRequired[str]
+        requestId: NotRequired[str]
+        resources: NotRequired[list[str]]
+        statement: NotRequired[str]
+        address: str
+        chainId: str
+        signature: str
+        type: str
+        signatureScheme: NotRequired[str]
+    class SiwxOptions
+        @dataclass(frozen=True, slots=True)
+        field kw_only origin: str
+        field kw_only store: Store
+        field kw_only grant: GrantFn
+        field kw_only verifier: SignatureVerifier | None = None
+        field kw_only body: bool = False
+    class SiwxTransport(httpx.AsyncBaseTransport)
+        def __init__(self, *, account: Any, inner: httpx.AsyncBaseTransport | None = None) -> None
+        async def aclose(self) -> None
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response
+    class VerifiedProof
+        @dataclass(frozen=True, slots=True)
+        field address: str
+        field chain_id: int
+    def create_extension(*, chain_id: int, origin: str, url: str) -> Extension
+    def decode(value: str) -> Payload
+    def encode(payload: Mapping[str, Any]) -> str
+    def from_payment_required(payment_required: Mapping[str, Any]) -> Extension | None
+    def to_message(payload: Mapping[str, Any]) -> str
+    async def verify(*, chain_id: int, origin: str, store: Store, payload: Payload, verifier: SignatureVerifier | None = None, claim_nonce: bool = True) -> VerifiedProof

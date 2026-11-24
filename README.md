@@ -152,6 +152,45 @@ mpp = Mpp(
 )
 ```
 
+### Identity
+
+A route can require who is calling, not only payment, as mppx's identity primitives do. Its
+`identity` option takes verifiers (from `mpp.identity`), all of which must pass before the
+`402` is issued, and an optional payment check that runs on the paid retry before the
+credential settles. A rejection gets a fixed status (401 missing or invalid, 403 forbidden,
+503 unavailable), never a fresh `402`.
+
+```python
+from mpp import identity
+from mpp.extensions.identity import tempo
+
+mpp = Mpp(methods=tempo_method, requires_auth=True)  # Authorization is the identity's
+tempo_id = tempo.server.create(client_id="app_...", store=store)
+
+handler = mpp.charge(amount="0.01", identity=identity.Route(payment=tempo_id.payment_check))
+result = await handler(request)
+if result.status != 200:
+    return result.challenge  # a 402 listing Identity-Required, or the identity rejection
+payer = result.identity.get(tempo_id.payment_check)  # tempo.Payer: user, accounts, email
+```
+
+`identity.from_fn` builds a verifier from your own lookup (return the identity, None when the
+request carries none, or raise `identity.RejectionError`), and `identity.any_of` accepts the
+first of several. Tempo ID's payment check requires a `tempo` payment from an account the
+user's token grants to the app; install it with `pip install "pympp[tempo-id]"`.
+
+On the client, provers add identity proofs to requests to their scope:
+
+```python
+prover = tempo.client.prover(
+    access_token=session.access_token,
+    dpop=tempo.client.DpopKey(session_key),  # omit to send a Bearer token
+    scope=["https://api.example.com"],
+)
+async with Mpp(methods=[tempo_client_method], identity=[prover]) as mpp:
+    response = await mpp.fetch("https://api.example.com/paid")
+```
+
 ### Pay x402 servers
 
 The `evm` client method also pays x402 v2 `exact` servers (EIP-3009 USDC),

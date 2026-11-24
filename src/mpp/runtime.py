@@ -10,8 +10,14 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from mpp import Challenge, Credential
+from mpp._parsing import (
+    is_legacy_unicode_escaped,
+    is_valid_payment_method_id,
+    validate_payment_method_id,
+)
 from mpp.errors import (
     InvalidChallengeError,
+    LegacyUnicodeEscapedChallengeError,
     NoMethodFoundError,
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
@@ -134,6 +140,12 @@ class PaymentRuntime:
         events: EventDispatcher | None = None,
     ) -> None:
         self.methods = _flatten(methods)
+        for method in self.methods:
+            if not is_valid_payment_method_id(method.name):
+                raise ValueError(
+                    f"Invalid payment method name {method.name!r}: method names must be "
+                    "lowercase letters (a-z)"
+                )
         self._methods: dict[tuple[str, str], list[ClientMethod]] = {}
         for method in self.methods:
             self._methods.setdefault((method.name, method.intent), []).append(method)
@@ -145,12 +157,23 @@ class PaymentRuntime:
         Challenges keep the server's order, except that native Payment challenges come
         before x402 offers, as in mppx: a client pays x402 only when no native challenge
         suits it. A challenge several methods can pay appears once per method, in
-        configured order.
+        configured order. A challenge whose method id the grammar rejects is unpayable
+        and skipped, so no method starts a payment its credential could not carry, as is
+        one that escaped a bound parameter as \\uXXXX (see :meth:`_legacy_error`).
         """
+        return self._candidates(challenges, legacy=False)
+
+    def _candidates(
+        self, challenges: Sequence[Challenge], *, legacy: bool
+    ) -> list[ChallengeCandidate]:
         candidates: list[ChallengeCandidate] = []
         for x402 in (False, True):
             for index, challenge in enumerate(challenges):
                 if is_x402_challenge(challenge) != x402:
+                    continue
+                if not is_valid_payment_method_id(challenge.method):
+                    continue
+                if is_legacy_unicode_escaped(challenge) != legacy:
                     continue
                 for method in self._methods.get((challenge.method, challenge.intent), ()):
                     if method.can_handle_challenge is None or method.can_handle_challenge(
@@ -160,6 +183,21 @@ class PaymentRuntime:
                             ChallengeCandidate(challenge=challenge, method=method, index=index)
                         )
         return candidates
+
+    def _legacy_error(
+        self, challenges: Sequence[Challenge]
+    ) -> LegacyUnicodeEscapedChallengeError | None:
+        """The error for a 402 none of whose challenges is payable, when a legacy one is.
+
+        A server before quoted-pair parsing escapes characters above U+00FF in bound
+        parameters as \\uXXXX, which now parse differently from what the challenge ID
+        binds. Such a challenge is skipped like an unusable offer; when a configured method
+        could otherwise have paid one, this returns the error that names the cause rather
+        than a missing method. ``None`` when no such challenge was offered.
+        """
+        if not self._candidates(challenges, legacy=True):
+            return None
+        return LegacyUnicodeEscapedChallengeError(challenges, self.methods)
 
     async def order_challenges(
         self,
@@ -189,7 +227,7 @@ class PaymentRuntime:
         """
         candidates = self.challenge_candidates(challenges)
         if not candidates:
-            raise NoMethodFoundError(challenges, self.methods)
+            raise self._legacy_error(challenges) or NoMethodFoundError(challenges, self.methods)
         return candidates[0].challenge, candidates[0].method
 
     async def create_credential(
@@ -201,20 +239,34 @@ class PaymentRuntime:
         request: Any = None,
         fetch: Callable[[Any], Awaitable[Any]] | None = None,
         attempt: PaymentAttempt | None = None,
+        check_expiry: bool = True,
     ) -> Credential:
         """Create a credential and emit its lifecycle events.
 
         ``request`` and ``fetch`` are passed to the method in :class:`CredentialParams`.
+        ``check_expiry`` set to ``False`` skips the expired-challenge check, for a retry
+        resuming a payment the method already started for this challenge: the method then
+        decides whether it can still be redeemed, and starts no new payment once it expired.
+
+        Raises:
+            ParseError: If the challenge's method id is not ``1*LOWERALPHA``. It is checked
+                before any event handler or method hook runs, so no payment starts for a
+                credential that could not be serialized.
+            LegacyUnicodeEscapedChallengeError: If the challenge escaped a bound parameter
+                as \\uXXXX; checked at the same point, so nothing is signed for it.
         """
         if not any(candidate is method for candidate in self.methods):
             raise ValueError("Method is not installed in this PaymentRuntime")
+        validate_payment_method_id(challenge.method)
+        if is_legacy_unicode_escaped(challenge):
+            raise LegacyUnicodeEscapedChallengeError([challenge], self.methods)
         if challenge.method != method.name or challenge.intent != method.intent:
             raise ValueError(
                 f"Method {method.key!r} does not support {challenge.method}/{challenge.intent}"
             )
         if method.can_handle_challenge is not None and not method.can_handle_challenge(challenge):
             raise ValueError(f"Method {method.key!r} does not accept this challenge")
-        if challenge.expires is not None:
+        if check_expiry and challenge.expires is not None:
             try:
                 expires = datetime.fromisoformat(challenge.expires)
             except (TypeError, ValueError) as error:
@@ -253,7 +305,8 @@ class PaymentRuntime:
             )
         except asyncio.CancelledError as error:
             tx_hash = credential.payload.get("hash")
-            if credential.payload.get("type") == "hash" and isinstance(tx_hash, str):
+            # Hash and Zone credentials both report a payment already on chain.
+            if credential.payload.get("type") in ("hash", "zone") and isinstance(tx_hash, str):
                 raise PaymentOutcomeUnknownError(
                     challenge,
                     error,

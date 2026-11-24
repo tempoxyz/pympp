@@ -187,6 +187,7 @@ async def hydrate_session_snapshot(
     *,
     rpc_url: str,
     client: httpx.AsyncClient | None = None,
+    voucher_signer: Any = None,
 ) -> tuple[ChannelEntry, int]:
     """Check a server snapshot and return the channel entry to cache and the server's spend.
 
@@ -203,8 +204,9 @@ async def hydrate_session_snapshot(
     from mpp.methods.tempo.session._channel import (
         resolve_authorized_signer as resolve_descriptor_signer,
     )
+    from mpp.methods.tempo.session._configurable import is_zero_hash
     from mpp.methods.tempo.session._voucher import verify_voucher
-    from mpp.methods.tempo.session.client._ops import is_same_address, resolve_authorized_signer
+    from mpp.methods.tempo.session.client._ops import is_same_address, voucher_authorities
     from mpp.methods.tempo.session.client._store import ChannelEntry
 
     signed = snapshot.highest_voucher
@@ -219,17 +221,44 @@ async def hydrate_session_snapshot(
     if snapshot.settled > snapshot.deposit:
         raise ValueError("session snapshot settled amount exceeds deposit")
     descriptor = snapshot.descriptor
-    if not verify_voucher(
-        snapshot.escrow, snapshot.chain_id, signed, resolve_descriptor_signer(descriptor)
+    signer = resolve_descriptor_signer(descriptor)
+    primitive = verify_voucher(snapshot.escrow, snapshot.chain_id, signed, signer)
+    if not primitive and not any(
+        # A TIP-1166 configurable account signer's voucher, under either possible snapshot.
+        verify_voucher(
+            snapshot.escrow,
+            snapshot.chain_id,
+            signed,
+            signer,
+            configurable=True,
+            opening_commitment=opening_commitment,
+        )
+        for opening_commitment in (None, descriptor.salt)
     ):
         raise ValueError("session snapshot highest voucher signature is invalid")
+    # Which of those the escrow accepts depends on the channel's opening commitment (TIP-1166),
+    # which only the escrow knows: a 0x05 voucher, or any voucher of a signer that has a config
+    # commitment, must pass its verifyVoucher view.
+    if not primitive or not is_zero_hash(
+        await chain.get_config_commitment(rpc_url, signer, client=client)
+    ):
+        if not await chain.verify_voucher_on_chain(
+            rpc_url,
+            descriptor,
+            signed.cumulative_amount,
+            signed.signature,
+            escrow=snapshot.escrow,
+            client=client,
+        ):
+            raise ValueError("session snapshot highest voucher is not valid for its channel")
     channel_id = compute_channel_id(descriptor, chain_id=snapshot.chain_id, escrow=snapshot.escrow)
     if channel_id.lower() != snapshot.channel_id.lower():
         raise ValueError("context channelId does not match descriptor")
     if not is_same_address(descriptor.payer, account.address):
         raise ValueError("context descriptor payer does not match account")
-    if not is_same_address(
-        resolve_descriptor_signer(descriptor), resolve_authorized_signer(account)
+    if not any(
+        is_same_address(signer, authority)
+        for authority in voucher_authorities(account, voucher_signer)
     ):
         raise ValueError("context descriptor authorizedSigner does not match account")
     state = await chain.get_channel_state(

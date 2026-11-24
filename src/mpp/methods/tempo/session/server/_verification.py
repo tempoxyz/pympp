@@ -24,6 +24,7 @@ from mpp._defaults import DEFAULT_TIMEOUT
 from mpp.errors import VerificationFailedError
 from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._channel import compute_channel_id, resolve_authorized_signer
+from mpp.methods.tempo.session._configurable import is_zero_hash
 from mpp.methods.tempo.session._protocol import (
     ZERO_ADDRESS,
     ChannelDescriptor,
@@ -206,13 +207,15 @@ def _read_source_address(source: str | None, chain_id: int) -> str:
 def assert_credential_source_can_spend(
     *, chain_id: int, channel: ChannelState, source: str | None
 ) -> None:
-    """Check the credential source is the channel's payer or authorized signer."""
+    """Check the credential source is the channel's payer.
+
+    Voucher signing authority is checked separately: the source names the funding account
+    even when a delegated authorized signer signs the vouchers.
+    """
     address = _read_source_address(source, chain_id)
-    if _same(address, channel.payer) or _same(address, channel.authorized_signer):
+    if _same(address, channel.payer):
         return
-    raise VerificationFailedError(
-        "credential source does not match channel payer or authorized signer"
-    )
+    raise VerificationFailedError("credential source does not match channel payer")
 
 
 # --------------------------------------------------------------------------------------------
@@ -393,10 +396,13 @@ def validate_voucher(
     escrow: str,
     min_voucher_delta: int,
     voucher: SignedVoucher,
+    configurable: bool = False,
 ) -> VoucherValidation:
     """Verify a cumulative voucher against channel state without changing persisted state.
 
-    ``already_accepted`` is set for a voucher equal to the highest accepted one.
+    ``already_accepted`` is set for a voucher equal to the highest accepted one. With
+    ``configurable``, a TIP-1166 configurable account voucher is checked against the
+    channel's ``opening_commitment``.
     """
     validate_channel_state(channel_state)
     if voucher.cumulative_amount > channel_state.deposit:
@@ -405,7 +411,14 @@ def validate_voucher(
         raise VerificationFailedError(
             "voucher cumulativeAmount must be strictly greater than highest accepted voucher"
         )
-    if not verify_voucher(escrow, chain_id, voucher, channel.authorized_signer):
+    if not verify_voucher(
+        escrow,
+        chain_id,
+        voucher,
+        channel.authorized_signer,
+        configurable=configurable,
+        opening_commitment=channel.opening_commitment,
+    ):
         raise InvalidSignatureError("invalid voucher signature")
     if voucher.cumulative_amount <= channel_state.settled:
         raise VerificationFailedError("voucher cumulativeAmount is below on-chain settled amount")
@@ -459,6 +472,7 @@ async def verify_and_accept_voucher(
     verified_at: int | None = None,
     charge_amount: int | None = None,
     on_charged: Callable[[ChannelState], None] | None = None,
+    configurable: bool = False,
 ) -> SessionReceipt:
     """Verify a voucher and record it as the channel's highest; returns the session receipt.
 
@@ -474,6 +488,7 @@ async def verify_and_accept_voucher(
         escrow=escrow,
         min_voucher_delta=min_voucher_delta,
         voucher=voucher,
+        configurable=configurable,
     )
     if validation.already_accepted and require_advance:
         raise DeltaTooSmallError("voucher does not add new funds for this request")
@@ -559,6 +574,10 @@ class CredentialContext:
     )
     last_on_chain_verified: dict[str, int] = field(default_factory=dict[str, int])
     min_voucher_delta: int = 0
+    configurable_vouchers: bool = False
+    """Accept TIP-1166 configurable account (0x05) voucher signatures."""
+    opening_commitments: dict[str, str] = field(default_factory=dict[str, str])
+    """TIP-1166 opening commitments looked up on chain, by lowercase channel ID."""
     on_session_settlement: OnSessionSettlement | None = None
     on_session_settlement_failure: OnSessionSettlementFailure | None = None
     require_voucher_advance: bool = False
@@ -600,6 +619,83 @@ async def _resolve_voucher_channel_state(
     if channel is None:
         raise ChannelNotFoundError("channel not found")
     return _stored_channel_state(channel)
+
+
+_ZERO_COMMITMENT = "0x" + "00" * 32
+
+
+async def _with_opening_commitment(
+    context: CredentialContext,
+    channel: ChannelState,
+    voucher: SignedVoucher,
+    *,
+    persist: bool = True,
+) -> ChannelState:
+    """channel with its TIP-1166 opening commitment, resolved on chain when unknown.
+
+    A channel stored without one (its open receipt was not seen here, or the record predates
+    the field) has a zero opening commitment when its signer has no config commitment now.
+    Otherwise the escrow's verifyVoucher view must accept voucher, and the commitment is the
+    one (zero or the salt) under which voucher verifies here. It is stored only when exactly
+    one does, so a primitive voucher is never accepted on a channel the escrow bound to a
+    configurable account. With persist false (advisory validation) neither the store nor the
+    cache changes.
+    """
+    if channel.opening_commitment is not None or channel.descriptor is None:
+        return channel
+    key = channel.channel_id.lower()
+    commitment = context.opening_commitments.get(key)
+    if commitment is not None:
+        return replace(channel, opening_commitment=commitment)
+    descriptor = channel.descriptor
+    signer = authorized_signer(descriptor)
+    # Check locally first, so a forged voucher costs no RPC.
+    candidates = [
+        candidate
+        for candidate in dict.fromkeys((_ZERO_COMMITMENT, descriptor.salt.lower()))
+        if verify_voucher(
+            context.escrow,
+            context.chain_id,
+            voucher,
+            signer,
+            configurable=context.configurable_vouchers,
+            opening_commitment=candidate,
+        )
+    ]
+    if not candidates:
+        raise InvalidSignatureError("invalid voucher signature")
+    on_chain = await chain.get_config_commitment(
+        context.rpc_url, signer, client=context.http_client
+    )
+    if is_zero_hash(on_chain):
+        # A config commitment is never removed, so the signer had none at open either.
+        candidates = [_ZERO_COMMITMENT]
+    else:
+        if not await chain.verify_voucher_on_chain(
+            context.rpc_url,
+            descriptor,
+            voucher.cumulative_amount,
+            voucher.signature,
+            escrow=context.escrow,
+            client=context.http_client,
+        ):
+            raise InvalidSignatureError("invalid voucher signature")
+        if len(candidates) > 1:
+            # Both fit this voucher; the escrow accepted it, so check the next one again.
+            return replace(channel, opening_commitment=candidates[0])
+    commitment = candidates[0]
+    if not persist:
+        return replace(channel, opening_commitment=commitment)
+    context.opening_commitments[key] = commitment
+    resolved = commitment
+
+    def store(current: ChannelState | None) -> ChannelState | None:
+        if current is None or current.opening_commitment is not None:
+            return current
+        return replace(current, opening_commitment=resolved)
+
+    await context.store.update_channel(channel.channel_id, store)
+    return replace(channel, opening_commitment=commitment)
 
 
 def _stored_channel_state(channel: ChannelState) -> chain.ChannelState:
@@ -697,6 +793,13 @@ async def _validate_open(context: CredentialContext, payload: OpenPayload) -> No
         validated=validated,
         descriptor=descriptor,
         request_amount=request.amount,
+        expected_commitment=await _expected_opening_commitment(
+            context,
+            validated.descriptor,
+            SignedVoucher(
+                channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
+            ),
+        ),
     )
     await chain.simulate_credential_transaction(
         context.rpc_url,
@@ -715,6 +818,7 @@ def _check_open_voucher(
     validated: chain.ValidatedOpenTransaction,
     descriptor: ChannelDescriptor,
     request_amount: int,
+    expected_commitment: str,
 ) -> None:
     assert_open_credential_covers_request(
         cumulative_amount=cumulative,
@@ -727,10 +831,83 @@ def _check_open_voucher(
     voucher = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=signature
     )
+    # TIP-1166: the open makes the signer's current config commitment the channel's opening
+    # commitment (it requires salt == commitment), so the voucher is checked against it before
+    # the server co-signs or broadcasts. The open's receipt rechecks it (_check_open_commitment).
     if not verify_voucher(
-        context.escrow, context.chain_id, voucher, authorized_signer(validated.descriptor)
+        context.escrow,
+        context.chain_id,
+        voucher,
+        authorized_signer(validated.descriptor),
+        configurable=context.configurable_vouchers,
+        opening_commitment=expected_commitment,
     ):
         raise InvalidSignatureError("invalid voucher signature")
+
+
+async def _expected_opening_commitment(
+    context: CredentialContext, descriptor: ChannelDescriptor, voucher: SignedVoucher
+) -> str:
+    """The opening commitment an open of descriptor would record now (TIP-1166).
+
+    From T15 a signer with a config commitment can only open with it as salt, which becomes
+    the channel's opening commitment; any other signer's channel opens with a zero one. It is
+    read whether or not configurable vouchers are accepted, so a primitive voucher from a
+    signer that adopted a configuration fails before the open is sponsored or broadcast. A
+    commitment never returns to zero, and one that changes before inclusion reverts the open.
+    """
+    if is_zero_hash(descriptor.salt):
+        return _ZERO_COMMITMENT
+    # Check locally first, so a forged voucher costs no RPC.
+    signer = authorized_signer(descriptor)
+    if not any(
+        verify_voucher(
+            context.escrow,
+            context.chain_id,
+            voucher,
+            signer,
+            configurable=context.configurable_vouchers,
+            opening_commitment=candidate,
+        )
+        for candidate in (_ZERO_COMMITMENT, descriptor.salt)
+    ):
+        raise InvalidSignatureError("invalid voucher signature")
+    commitment = await chain.get_config_commitment(
+        context.rpc_url, signer, client=context.http_client
+    )
+    if is_zero_hash(commitment):
+        return _ZERO_COMMITMENT
+    if not _same(commitment, descriptor.salt):
+        raise VerificationFailedError(
+            "descriptor salt is not the voucher signer's configuration commitment"
+        )
+    return commitment.lower()
+
+
+def _check_open_commitment(
+    context: CredentialContext,
+    *,
+    channel_id: str,
+    cumulative: int,
+    signature: str,
+    descriptor: ChannelDescriptor,
+    opening_commitment: str | None,
+) -> None:
+    """Recheck an open's voucher against the opening commitment its receipt cached (TIP-1166)."""
+    voucher = SignedVoucher(
+        channel_id=channel_id, cumulative_amount=cumulative, signature=signature
+    )
+    if not verify_voucher(
+        context.escrow,
+        context.chain_id,
+        voucher,
+        authorized_signer(descriptor),
+        configurable=context.configurable_vouchers,
+        opening_commitment=opening_commitment,
+    ):
+        raise InvalidSignatureError(
+            "invalid voucher signature for the channel's opening commitment"
+        )
 
 
 async def _validate_top_up(context: CredentialContext, payload: TopUpPayload) -> None:
@@ -816,6 +993,7 @@ async def _validate_voucher(context: CredentialContext, payload: VoucherPayload)
     )
     if channel.finalized:
         raise ChannelClosedError("channel is finalized")
+    channel = await _with_opening_commitment(context, channel, voucher, persist=False)
     state = (
         _stored_channel_state(channel)
         if _can_use_stored_channel_state(context, channel, voucher)
@@ -830,11 +1008,12 @@ async def _validate_voucher(context: CredentialContext, payload: VoucherPayload)
         escrow=context.escrow,
         min_voucher_delta=context.min_voucher_delta,
         voucher=voucher,
+        configurable=context.configurable_vouchers,
     )
 
 
 async def _check_close(
-    context: CredentialContext, payload: ClosePayload
+    context: CredentialContext, payload: ClosePayload, *, persist: bool = True
 ) -> tuple[ChannelState, chain.ChannelState, int, int, str]:
     """Shared close checks; returns (channel, state, cumulative, capture, channel_id)."""
     request = get_challenge_payment_fields(context.challenge)
@@ -857,11 +1036,26 @@ async def _check_close(
         chain_id=context.chain_id,
         escrow=context.escrow,
     )
+    channel = await _with_opening_commitment(
+        context,
+        channel,
+        SignedVoucher(
+            channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
+        ),
+        persist=persist,
+    )
     authorization = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=payload.close_signature
     )
     if not verify_close_authorization(
-        context.escrow, context.chain_id, authorization, [channel.payer, channel.authorized_signer]
+        context.escrow, context.chain_id, authorization, [channel.payer]
+    ) and not verify_close_authorization(
+        context.escrow,
+        context.chain_id,
+        authorization,
+        [channel.authorized_signer],
+        configurable=context.configurable_vouchers,
+        opening_commitment=channel.opening_commitment,
     ):
         raise InvalidSignatureError("invalid close authorization signature")
     if channel.finalized:
@@ -882,7 +1076,14 @@ async def _check_close(
     voucher = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
     )
-    if not verify_voucher(context.escrow, context.chain_id, voucher, channel.authorized_signer):
+    if not verify_voucher(
+        context.escrow,
+        context.chain_id,
+        voucher,
+        channel.authorized_signer,
+        configurable=context.configurable_vouchers,
+        opening_commitment=channel.opening_commitment,
+    ):
         raise InvalidSignatureError("invalid voucher signature")
     capture = uint96(max(channel.spent, state.settled))
     if capture > state.deposit:
@@ -891,7 +1092,7 @@ async def _check_close(
 
 
 async def _validate_close(context: CredentialContext, payload: ClosePayload) -> None:
-    channel, _, _, _, channel_id = await _check_close(context, payload)
+    channel, _, _, _, channel_id = await _check_close(context, payload, persist=False)
     assert_settlement_sender(
         operation="close",
         channel_id=channel_id,
@@ -944,6 +1145,14 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
         operator,
     )
 
+    expected_commitment = await _expected_opening_commitment(
+        context,
+        descriptor,
+        SignedVoucher(
+            channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
+        ),
+    )
+
     def before_broadcast(prepared: chain.ValidatedOpenTransaction) -> None:
         _check_open_voucher(
             context,
@@ -953,6 +1162,7 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
             validated=prepared,
             descriptor=descriptor,
             request_amount=request.amount,
+            expected_commitment=expected_commitment,
         )
 
     await check_atomic_update(context.store, channel_id)
@@ -977,6 +1187,18 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
     )
     assert_same_descriptor(result.descriptor, descriptor)
     validate_channel_state(result.state, request.amount)
+    # The receipt settles the opening commitment: the open's voucher follows the same rules as
+    # every later voucher (a primitive one fails once the escrow cached a commitment).
+    opening_commitment = result.opening_commitment or _ZERO_COMMITMENT
+    _check_open_commitment(
+        context,
+        channel_id=channel_id,
+        cumulative=cumulative,
+        signature=payload.signature,
+        descriptor=result.descriptor,
+        opening_commitment=opening_commitment,
+    )
+    context.opening_commitments[channel_id.lower()] = opening_commitment
 
     def update(current: ChannelState | None) -> ChannelState | None:
         if (
@@ -996,6 +1218,7 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
             cumulative_amount=cumulative,
             signature=payload.signature,
             state=result.state,
+            opening_commitment=opening_commitment,
         )
 
     updated = await context.store.update_channel(channel_id, update)
@@ -1201,6 +1424,7 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
             require_advance=context.require_voucher_advance,
             charge_amount=context.charge_amount,
             on_charged=context.on_charged,
+            configurable=context.configurable_vouchers,
         )
     channel = loaded
     read = read_channel_state()
@@ -1220,6 +1444,7 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
     if state.close_requested_at != 0:
         await _record_pending_close(context, channel_id, state)
         raise ChannelClosedError("channel has a pending close request")
+    reconciled = await _with_opening_commitment(context, reconciled, voucher)
     return await verify_and_accept_voucher(
         store=context.store,
         challenge_id=context.challenge.id,
@@ -1233,6 +1458,7 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
         verified_at=read.started_at,
         charge_amount=context.charge_amount,
         on_charged=context.on_charged,
+        configurable=context.configurable_vouchers,
     )
 
 
@@ -1260,7 +1486,7 @@ async def _accept_or_load_voucher_channel(
     )
     if channel.finalized:
         raise ChannelClosedError("channel is finalized")
-    return channel
+    return await _with_opening_commitment(context, channel, voucher)
 
 
 async def _accept_voucher_in_one_update(
@@ -1272,9 +1498,23 @@ async def _accept_voucher_in_one_update(
     """Accept a voucher, and charge its request, in one store update with no separate read.
 
     The update checks the stored channel itself. Returns None without writing when the stored
-    on-chain state was not verified recently enough to accept against.
+    on-chain state was not verified recently enough to accept against, or when the channel's
+    TIP-1166 opening commitment is not known yet (the caller's slower path looks it up).
     """
-    if not verify_voucher(context.escrow, context.chain_id, voucher, authorized_signer(descriptor)):
+    signer = authorized_signer(descriptor)
+
+    def signature_valid(opening_commitment: str) -> bool:
+        return verify_voucher(
+            context.escrow,
+            context.chain_id,
+            voucher,
+            signer,
+            configurable=context.configurable_vouchers,
+            opening_commitment=opening_commitment,
+        )
+
+    cached = context.opening_commitments.get(voucher.channel_id.lower())
+    if cached is not None and not signature_valid(cached):
         raise InvalidSignatureError("invalid voucher signature")
     charge_amount = context.charge_amount
 
@@ -1283,6 +1523,11 @@ async def _accept_voucher_in_one_update(
             raise ChannelNotFoundError("channel not found")
         if not is_precompile_state(current) or current.descriptor is None:
             raise VerificationFailedError("channel is not precompile-backed")
+        commitment = current.opening_commitment or cached
+        if commitment is None:
+            return StoreChange("noop", None)
+        if commitment != cached and not signature_valid(commitment):
+            raise InvalidSignatureError("invalid voucher signature")
         assert_same_descriptor(descriptor, current.descriptor)
         validate_channel_descriptor(
             descriptor,

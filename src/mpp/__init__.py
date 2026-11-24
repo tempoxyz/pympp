@@ -9,7 +9,6 @@ import base64
 import hashlib
 import hmac
 import math
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -22,6 +21,7 @@ from mpp._parsing import (
     format_authorization,
     format_payment_receipt,
     format_www_authenticate,
+    is_payment_authorization_header,
     parse_authorization,
     parse_payment_receipt,
     parse_www_authenticate,
@@ -29,9 +29,11 @@ from mpp._parsing import (
 from mpp.errors import (
     BadRequestError,
     CredentialReplayedError,
+    InsufficientBalanceError,
     InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
+    LegacyUnicodeEscapedChallengeError,
     MalformedCredentialError,
     NoMethodFoundError,
     PaymentActionRequiredError,
@@ -42,6 +44,7 @@ from mpp.errors import (
     PaymentOutcomeUnknownError,
     PaymentRequiredError,
     PaymentSimulationError,
+    SpendingLimitExceededError,
     VerificationFailedError,
 )
 from mpp.events import (
@@ -59,26 +62,52 @@ from mpp.events import (
 
 AUTHORIZATION_HEADER = "Authorization"
 PAYMENT_AUTHORIZATION_HEADER = "Payment-Authorization"
-_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 
 def is_default_credential_header(header: str | None) -> bool:
-    """True when the credential header is omitted or is the implicit Authorization default."""
-    return header is None or header == "" or header.lower() == AUTHORIZATION_HEADER.lower()
+    """True when the credential header is omitted or is the implicit Authorization default.
+
+    ``Authorization`` is matched ASCII case-insensitively. It is the local configuration
+    shorthand: a challenge received with an explicit ``header="Authorization"`` is
+    rejected by the parser instead. The empty string is not the default.
+    """
+    return header is None or (header.isascii() and header.lower() == AUTHORIZATION_HEADER.lower())
 
 
 def advertised_credential_header(header: str | None) -> str | None:
-    """Return an advertised credential header, or None for the Authorization default.
+    """Return a credential header as it is advertised and bound into the challenge ID.
 
-    ``Authorization`` is the implicit protocol default and is intentionally not
-    advertised on the wire. This preserves the legacy challenge binding.
+    ``Authorization`` (any case) or a missing value is the implicit protocol default and
+    is intentionally not advertised on the wire, preserving the legacy challenge binding.
+    The only other field a challenge may select is ``Payment-Authorization``, matched
+    ASCII case-insensitively and returned in the spelling given, because clients echo a
+    received challenge's ``header`` unchanged and its ID binds that spelling.
+
+    Raises:
+        ValueError: For any other value, including the empty string: servers must not
+            advertise it (https://paymentauth.org).
     """
     if is_default_credential_header(header):
         return None
-    name = str(header)
-    if not _HTTP_HEADER_NAME_RE.fullmatch(name):
-        raise ValueError("Invalid HTTP header name")
-    return name
+    if is_payment_authorization_header(header):
+        return header
+    raise ValueError(
+        "Unsupported credential header: challenges may only select Payment-Authorization"
+    )
+
+
+def _canonical_credential_header(header: str | None) -> str | None:
+    """Normalize a locally configured credential header before it is bound or emitted.
+
+    ``Authorization`` (any case) or a missing value is the default and is not advertised,
+    and any spelling of ``Payment-Authorization`` becomes the canonical one.
+
+    Raises:
+        ValueError: For any other value, including the empty string.
+    """
+    if advertised_credential_header(header) is None:
+        return None
+    return PAYMENT_AUTHORIZATION_HEADER
 
 
 def _b64url_encode(data: str) -> str:  # pyright: ignore[reportUnusedFunction]  # used by tests
@@ -129,7 +158,9 @@ def generate_challenge_id(
         digest: Optional digest of request body.
         opaque: Optional server-defined correlation data.
         header: Optional HTTP field for the Payment credential. Authorization
-            is omitted; any other value is bound into the ID.
+            is omitted; a ``Payment-Authorization`` spelling is bound into the ID
+            exactly as given, so a server verifying a credential passes the echoed
+            value unchanged. Any other value raises ``ValueError``.
 
     Returns:
         Base64url-encoded HMAC-SHA256 of the challenge parameters.
@@ -294,16 +325,27 @@ class Challenge:
     # echoes it unchanged (clients MUST NOT modify opaque). Used only while it
     # still decodes to opaque; otherwise the canonical encoding is used.
     _opaque_b64: str | None = field(default=None, repr=False, compare=False)
+    # Set by the header parser when a bound parameter held a \uXXXX escape: the value
+    # read differs from the one the issuer bound, so clients refuse to pay it. Never
+    # serialized.
+    _legacy_unicode_escape: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        advertised = advertised_credential_header(self.header)
-        if advertised != self.header:
-            object.__setattr__(self, "header", advertised)
+        # A locally constructed challenge emits the canonical spelling. The parser keeps a
+        # received challenge's spelling instead (see ``parse_www_authenticate``).
+        canonical = _canonical_credential_header(self.header)
+        if canonical != self.header:
+            object.__setattr__(self, "header", canonical)
 
     @property
     def credential_header(self) -> str:
-        """HTTP field a client must use for the payment credential."""
-        return self.header or AUTHORIZATION_HEADER
+        """HTTP field a client must use for the payment credential.
+
+        ``Authorization`` when the challenge omits ``header``, and the canonical
+        ``Payment-Authorization`` for any spelling of it.
+        """
+        # ``header`` is always absent or a Payment-Authorization spelling.
+        return PAYMENT_AUTHORIZATION_HEADER if self.header is not None else AUTHORIZATION_HEADER
 
     @classmethod
     def create(
@@ -338,15 +380,17 @@ class Challenge:
             digest: Optional digest of request body.
             description: Optional human-readable description.
             meta: Optional server-defined correlation data (stored as opaque).
-            header: Optional HTTP field for the Payment credential. Authorization
-                is the implicit default and is not advertised.
+            header: Optional HTTP field for the Payment credential: ``Payment-Authorization``
+                (bound and emitted in its canonical spelling), or ``Authorization`` (the
+                implicit default, not advertised). Any other value, including the empty
+                string, raises ``ValueError``.
 
         Returns:
             A Challenge with an HMAC-bound ID.
         """
         if expires:
             _validate_expires(expires)
-        header = advertised_credential_header(header)
+        header = _canonical_credential_header(header)
         challenge_id = generate_challenge_id(
             secret_key=secret_key,
             realm=realm,
@@ -479,6 +523,7 @@ class ChallengeEcho:
     description: str | None = None
 
     def __post_init__(self) -> None:
+        # The echo keeps the challenge's spelling unchanged: the challenge ID binds it.
         advertised = advertised_credential_header(self.header)
         if advertised != self.header:
             object.__setattr__(self, "header", advertised)
@@ -606,9 +651,11 @@ __all__ = [
     "CredentialReplayedError",
     "EventDispatcher",
     "Expires",
+    "InsufficientBalanceError",
     "InternalPaymentError",
     "InvalidChallengeError",
     "InvalidPayloadError",
+    "LegacyUnicodeEscapedChallengeError",
     "MalformedCredentialError",
     "MemoryStore",
     "Method",
@@ -629,6 +676,7 @@ __all__ = [
     "PaymentRequiredError",
     "PaymentSimulationError",
     "Receipt",
+    "SpendingLimitExceededError",
     "Store",
     "VerificationFailedError",
     "WILDCARD_EVENT",

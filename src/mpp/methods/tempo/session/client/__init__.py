@@ -4,6 +4,13 @@
 ``session_manager(...)`` drives one channel with fetch, top-up and close.
 """
 
+from mpp.methods.tempo.session._configurable import (
+    ConfigurableAccount,
+    ConfigurableAccountConfig,
+    ConfigurableAccountOwner,
+    ConfigurableVouchersUnsupportedError,
+    SignerConfigChangedError,
+)
 from mpp.methods.tempo.session._snapshot import (
     SessionSnapshot,
     deserialize_snapshot,
@@ -30,6 +37,10 @@ from mpp.methods.tempo.session.client._store import (
 __all__ = [
     "ChannelEntry",
     "ChannelStore",
+    "ConfigurableAccount",
+    "ConfigurableAccountConfig",
+    "ConfigurableAccountOwner",
+    "ConfigurableVouchersUnsupportedError",
     "JsonChannelKv",
     "JsonChannelStore",
     "MemoryChannelStore",
@@ -38,6 +49,7 @@ __all__ = [
     "SessionManager",
     "SessionMethod",
     "SessionSnapshot",
+    "SignerConfigChangedError",
     "UncertainFundingError",
     "create_channel_store",
     "create_json_channel_store",

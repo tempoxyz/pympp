@@ -18,6 +18,8 @@ CLIENT_MODULES = [
     "mpp.methods.tempo",
     "mpp.methods.tempo.client",
     "mpp.methods.tempo.intents",
+    "mpp.identity",
+    "mpp.extensions.identity.tempo.client",
 ]
 
 # Modules that must NOT be loaded as a side-effect of the above imports.

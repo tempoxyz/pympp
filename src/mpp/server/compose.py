@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, _body_digest
 from mpp._parsing import ParseError, _b64_decode, _validate_expires
 from mpp._typing import is_dict, is_mapping
+from mpp._validation import Validation
 from mpp.errors import (
     InvalidChallengeError,
     InvalidPayloadError,
@@ -26,6 +27,15 @@ from mpp.errors import (
     VerificationFailedError,
 )
 from mpp.events import PAYMENT_FAILED
+from mpp.identity import _EMPTY_ROUTE, PaymentCheck, PaymentCheckInput, Rejected, Results, Route
+from mpp.identity import _requirements as identity_requirements
+from mpp.server._identity import (
+    PAYER_MISMATCH,
+    PAYER_UNKNOWN,
+    X402_REJECTED,
+    IdentityContext,
+    IdentityRejectedError,
+)
 from mpp.server.http import PaymentRequired, PaymentResult, PaymentVerified, Request, Response
 from mpp.server.method import (
     SETTLING_METHOD,
@@ -44,6 +54,7 @@ from mpp.server.verify import (
     _requests_match,
     verify_or_challenge,
 )
+from mpp.x402 import siwx
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
 from mpp.x402._server import X402Input, challenges_payment_required_header
 from mpp.x402._types import (
@@ -56,10 +67,11 @@ from mpp.x402._types import (
 
 if TYPE_CHECKING:
     from mpp.server.mpp import Mpp
+    from mpp.x402.siwx import SiwxOptions
 
 BodyType = str | bytes | dict[str, Any]
 BodyParamsType = BodyType | Callable[[Request], BodyType | Awaitable[BodyType]] | None
-ROUTE_OPTION_KEYS = frozenset({"body", "description", "expires", "expires_in", "meta"})
+ROUTE_OPTION_KEYS = frozenset({"body", "description", "expires", "expires_in", "identity", "meta"})
 
 MCP_URL_PREFIX = "mcp:"
 """URL prefix of MCP tool calls, which carry credentials in _meta, not an HTTP field."""
@@ -84,12 +96,20 @@ class _MethodIntent:
     """Runs a server method's hooks for one prepared offer."""
 
     def __init__(
-        self, method: ServerMethod, input: dict[str, Any], http_request: Request | None = None
+        self,
+        method: ServerMethod,
+        input: dict[str, Any],
+        http_request: Request | None = None,
+        gate: _PaymentGate | None = None,
     ) -> None:
         self.name = method.intent
         self._method = method
+        self._credential_grace = method._credential_grace
+        self._issue_expiry_grace = method._issue_expiry_grace
         self._input = input
         self._http_request = http_request
+        # The route's identity payment check, run after authentication and before settlement.
+        self._gate = gate
         # The management response the method's ``respond`` hook returned, if any.
         self.response: Response | None = None
 
@@ -118,7 +138,11 @@ class _MethodIntent:
             ),
             input=self._http_request,
         )
-        receipt, _ = await self._method.settle(context)
+        match = _PayerMatch()
+        if self._gate is not None:
+            match = await self._gate(context.credential, context.challenge)
+        receipt, _ = await self._method.settle(context, before_broadcast=match.before_broadcast)
+        match.after_settle(receipt)
         if self._method.respond is not None:
             # Like mppx, after verification and before ``payment.success``.
             response = await resolve(
@@ -154,6 +178,20 @@ class _X402MethodIntent(_MethodIntent):
     ) -> tuple[dict[str, Any], str | None]:
         assert self._method.x402 is not None
         return self._method.x402.x402_credential_payload(payment, request)
+
+    @property
+    def siwx(self) -> SiwxOptions | None:
+        """The method's x402 ``sign-in-with-x`` options, when it accepts SIWX."""
+        return getattr(self._method.x402, "siwx", None)
+
+    @staticmethod
+    def siwx_chain_id(request: Mapping[str, Any]) -> int | None:
+        """EVM chain ID that SIWX proofs for this offer are signed for."""
+        details = request.get("methodDetails")
+        chain_id = details.get("chainId") if is_mapping(details) else None
+        if isinstance(chain_id, bool) or not isinstance(chain_id, int):
+            return None
+        return chain_id
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -193,6 +231,7 @@ class _Offer:
     method: ServerMethod
     options: dict[str, Any]
     selection: object | None = None
+    identity: Route = _EMPTY_ROUTE
 
     def owns(self, credential: Credential) -> bool:
         """Return whether this offer's server authenticated the credential."""
@@ -265,12 +304,74 @@ class _PreparedOffer:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _PayerMatch:
+    """Holds a settlement to the account a payment check vetted (none: anything matches).
+
+    A method that validates before it broadcasts is held to it before any funds move; one that
+    only verifies, after settlement.
+    """
+
+    vetted: str | None = None
+
+    def before_broadcast(self, validation: Validation) -> None:
+        self._match(validation.payer)
+
+    def after_settle(self, receipt: Receipt) -> None:
+        self._match(receipt.payer)
+
+    def _match(self, payer: str | None) -> None:
+        # A method that cannot say who paid cannot prove it was the vetted account.
+        if not self.vetted:
+            return
+        if not payer:
+            raise IdentityRejectedError("payment", PAYER_UNKNOWN)
+        if payer.lower() != self.vetted.lower():
+            raise IdentityRejectedError("payment", PAYER_MISMATCH)
+
+
+_PaymentGate: TypeAlias = Callable[[Credential, Challenge], Awaitable[_PayerMatch]]
+
+
 @dataclass
 class _Call:
-    """State shared by the offers prepared for one request."""
+    """State shared by the offers prepared for one request.
+
+    ``identity`` runs each identity verifier once for the whole call; ``settled`` is the offer
+    that settled a payment, and ``checked`` the payment check values its gate recorded.
+    """
 
     bodies: dict[int, BodyType | None] = field(default_factory=dict[int, BodyType | None])
     prepared: list[_PreparedOffer] = field(default_factory=list[_PreparedOffer])
+    identity: IdentityContext | None = None
+    settled: _PreparedOffer | None = None
+    checked: dict[PaymentCheck[Any], Any] = field(default_factory=dict[PaymentCheck[Any], Any])
+
+    def gate(self, offer: _Offer, request: Request) -> _PaymentGate | None:
+        """The payment check gate of an offer, or None when it has no payment check."""
+        check = offer.identity.payment
+        context = self.identity
+        if check is None or context is None:
+            return None
+
+        async def run(credential: Credential, challenge: Challenge) -> _PayerMatch:
+            outcome = await context.check(
+                check,
+                PaymentCheckInput(request=request, challenge=challenge, credential=credential),
+            )
+            if isinstance(outcome, Rejected):
+                # The client may already have pushed this payment: reject without a fresh 402.
+                raise IdentityRejectedError("payment", outcome)
+            self.checked[check] = outcome.value
+            return _PayerMatch(check.payer(outcome.value) if check.payer is not None else None)
+
+        return run
+
+    async def request_identity(self, offer: _Offer) -> Results | Rejected:
+        """The outcome of an offer's request verifiers (valid with no values when it has none)."""
+        if not offer.identity.request or self.identity is None:
+            return Results()
+        return await self.identity.verify(offer.identity)
 
 
 class _AmbiguousOffersError(Exception):
@@ -328,7 +429,12 @@ async def _prepare_offer(
     # MCP tool calls carry credentials in _meta, not an HTTP field: bind no header.
     header = None if request.url.startswith(MCP_URL_PREFIX) else offer.server.credential_header
     prepared = _PreparedOffer(
-        offer, _intent(method, input, request), wire, expires, call.bodies[key], header
+        offer,
+        _intent(method, input, request, call.gate(offer, request)),
+        wire,
+        expires,
+        call.bodies[key],
+        header,
     )
     call.prepared.append(prepared)
     return prepared
@@ -342,10 +448,12 @@ def _offer_expires(offer: _Offer) -> str | None:
     return offer.options.get("expires")
 
 
-def _intent(method: ServerMethod, input: dict[str, Any], request: Request) -> _MethodIntent:
+def _intent(
+    method: ServerMethod, input: dict[str, Any], request: Request, gate: _PaymentGate | None
+) -> _MethodIntent:
     if method.x402 is not None:
-        return _X402MethodIntent(method, input, request)
-    return _MethodIntent(method, input, request)
+        return _X402MethodIntent(method, input, request, gate)
+    return _MethodIntent(method, input, request, gate)
 
 
 def _validate_options(  # pyright: ignore[reportUnusedFunction]  # used by mpp.server.mpp
@@ -390,6 +498,7 @@ class ComposedHandler:
             raise TypeError("compose() accepts only configured handlers")
         self._offers = tuple(offer for handler in handlers for offer in handler._offers)
         self._composed = True
+        _check_identity_composition(self._offers)
 
     @classmethod
     def _from_offers(cls, offers: Sequence[_Offer], *, composed: bool) -> ComposedHandler:
@@ -397,6 +506,7 @@ class ComposedHandler:
         handler = cls.__new__(cls)
         handler._offers = tuple(offers)
         handler._composed = composed
+        _check_identity_composition(handler._offers)
         return handler
 
     @property
@@ -407,7 +517,12 @@ class ComposedHandler:
         method's ``resolve_request`` reads it (:attr:`ServerMethod.needs_request_body`).
         """
         return any(
-            callable(offer.options.get("body")) or offer.method.needs_request_body
+            callable(offer.options.get("body"))
+            or offer.method.needs_request_body
+            # An identity verifier or payment check that reads the body (body=True).
+            or offer.identity.body
+            # An x402 sign-in-with-x grant that reads the body (SiwxOptions.body).
+            or _siwx_reads_body(offer.method)
             for offer in self._offers
         )
 
@@ -417,7 +532,23 @@ class ComposedHandler:
         return tuple(offer.method for offer in self._offers)
 
     async def __call__(self, request: Request) -> PaymentResult:
-        """Verify the request's credential, or return the challenges to pay."""
+        """Verify the request's credential, or return the challenges to pay.
+
+        A route with identity runs its verifiers first: an offer whose verifiers reject is not
+        offered, and when every offer rejects (or the credential's offer does), the result is
+        the rejection. The payment check runs on the paid retry before settlement.
+        """
+        if request.url.startswith(MCP_URL_PREFIX) and any(
+            not offer.identity.empty for offer in self._offers
+        ):
+            raise TypeError("Route identity requires the HTTP transport.")
+        call = _Call(identity=IdentityContext(request))
+        try:
+            return await self._call(request, call)
+        except IdentityRejectedError as rejected:
+            return PaymentRequired(rejected.response, rejection=rejected.rejection)
+
+    async def _call(self, request: Request, call: _Call) -> PaymentResult:
         server = self._offers[0].server
         authorization = request.headers.get(
             PAYMENT_AUTHORIZATION_HEADER if server.requires_auth else "Authorization"
@@ -431,10 +562,9 @@ class ComposedHandler:
             if request.url.startswith(("http://", "https://"))
             else None
         )
-        handled = await self._preflight(request, authorization)
+        handled = await self._preflight(request, authorization, call)
         if handled is not None:
             return PaymentRequired(handled)
-        call = _Call()
         try:
             result = await self._verify(authorization, request, x402, call)
         except PaymentError as error:
@@ -459,7 +589,12 @@ class ComposedHandler:
                 self._challenge_response(request, result.challenges, result.error, call)
             )
         credential, receipt = result
-        verified = PaymentVerified(credential=credential, receipt=receipt)
+        identity = Results()
+        if call.settled is not None:
+            requested = await call.request_identity(call.settled.offer)
+            assert isinstance(requested, Results)
+            identity = Results({**requested.values, **call.checked})
+        verified = PaymentVerified(credential=credential, receipt=receipt, identity=identity)
         response = next(
             (offer.intent.response for offer in call.prepared if offer.intent.response is not None),
             None,
@@ -469,7 +604,9 @@ class ComposedHandler:
         # The management response carries the receipt headers the route's would.
         return replace(verified, response=verified.with_receipt(response))
 
-    async def _preflight(self, request: Request, authorization: str | None) -> Response | None:
+    async def _preflight(
+        self, request: Request, authorization: str | None, call: _Call
+    ) -> Response | None:
         """Run the offers' preflight hooks in order (mppx ``preflight``); the first response wins.
 
         Like mppx, only HTTP requests are preflighted, not MCP tool calls.
@@ -477,6 +614,10 @@ class ComposedHandler:
         hooks = [offer for offer in self._offers if offer.method.preflight is not None]
         if not hooks or request.url.startswith(MCP_URL_PREFIX):
             return None
+        # Like mppx, a route runs its identity verifiers before its preflight hook.
+        hooks = [
+            offer for offer in hooks if isinstance(await call.request_identity(offer), Results)
+        ]
         credential = _parse_credential(authorization)
         if self._composed and any(
             offer.method.can_offer is not None or offer.selection is not None
@@ -538,6 +679,16 @@ class ComposedHandler:
             for challenge in challenges
         ]
         headers += [("Cache-Control", "no-store"), ("Content-Type", "application/problem+json")]
+        # Matched by terms, not request: a retained session Challenge may carry an older
+        # request, and offers with the same terms share their payment check.
+        requirements = identity_requirements.merge(
+            offer.offer.identity.requirements
+            for offer in _issuers(call, challenges, same_request=False)
+        )
+        if requirements:
+            headers.append(
+                (identity_requirements.HEADER, identity_requirements.serialize(requirements))
+            )
         if request.url.startswith(("http://", "https://")):
             x402 = challenges_payment_required_header(
                 challenges,
@@ -545,6 +696,7 @@ class ComposedHandler:
                 request.url,
                 request.method,
                 str(error) if error is not None else None,
+                lambda challenge: _x402_siwx(call, challenge, request.url),
             )
             if x402 is not None:
                 headers.append((PAYMENT_REQUIRED_HEADER, x402))
@@ -574,12 +726,17 @@ class ComposedHandler:
             if x402_result is not None:
                 return x402_result
         if credential is not None:
-            prepared_offers = [
-                await _prepare_offer(offer, request, credential, call)
-                for offer in self._offers
-                if offer.method.name == credential.challenge.method
-                and offer.method.intent == credential.challenge.intent
-            ]
+            # Offers whose identity verifiers reject were never advertised to this caller, so
+            # they cannot make the credential's offer ambiguous.
+            prepared_offers = await self._identified(
+                [
+                    await _prepare_offer(offer, request, credential, call)
+                    for offer in self._offers
+                    if offer.method.name == credential.challenge.method
+                    and offer.method.intent == credential.challenge.intent
+                ],
+                call,
+            )
             try:
                 selected_offer = self._select_offer(credential, prepared_offers)
             except _AmbiguousOffersError as error:
@@ -594,16 +751,142 @@ class ComposedHandler:
                 return ComposedChallenges(tuple(challenges))
             if selected_offer is not None:
                 result = await selected_offer.verify(authorization)
-                return ComposedChallenges((result,)) if isinstance(result, Challenge) else result
+                if isinstance(result, Challenge):
+                    return ComposedChallenges((result,))
+                call.settled = selected_offer
+                return result
 
-        prepared = [await _prepare_offer(offer, request, None, call) for offer in self._offers]
+        prepared = await self._identified(
+            [await _prepare_offer(offer, request, None, call) for offer in self._offers], call
+        )
+        advertised = await self._advertised(prepared, request, call)
+        siwx_error: Exception | None = None
+        if credential is None:
+            signed_in = await self._sign_in(request, advertised, call)
+            if isinstance(signed_in, Exception):
+                siwx_error = signed_in
+            elif signed_in is not None:
+                return signed_in
         challenges: list[Challenge] = []
-        for prepared_offer in await self._advertised(prepared, request, call):
+        for prepared_offer in advertised:
             result = await prepared_offer.verify(authorization)
             if not isinstance(result, Challenge):
+                call.settled = prepared_offer
                 return result
             challenges.append(result)
-        return ComposedChallenges(tuple(challenges))
+        if siwx_error is not None and challenges:
+            # Report the rejected proof like a rejected Payment credential, as mppx does.
+            reporter = next(offer for offer in advertised if _siwx_offer(offer) is not None)
+            await reporter.offer.server._events.emit(
+                PAYMENT_FAILED,
+                {
+                    "challenge": challenges[0],
+                    "credential": None,
+                    "error": siwx_error,
+                    "intent": reporter.intent.name,
+                    "method": reporter.offer.method.name,
+                    "request": reporter.request,
+                },
+            )
+        return ComposedChallenges(tuple(challenges), error=siwx_error)
+
+    @staticmethod
+    async def _sign_in(
+        request: Request, advertised: Sequence[_PreparedOffer], call: _Call
+    ) -> tuple[Credential, Receipt] | Exception | None:
+        """Grant a request with a valid x402 ``SIGN-IN-WITH-X`` proof (mppx ``authorize``).
+
+        Returns the credential and receipt of a granted wallet, nothing for a request
+        without a proof or one ``grant`` refuses (it gets the route's 402), and the error
+        for an invalid proof, whose 402 carries the spec's code.
+        """
+        header = request.headers.get(siwx.HEADER)
+        if not header or request.url.startswith(MCP_URL_PREFIX):
+            return None
+        offers = [
+            (offer, accepted)
+            for offer in advertised
+            if (accepted := _siwx_offer(offer)) is not None
+        ]
+        if not offers:
+            return None
+        try:
+            payload = siwx.decode(header)
+        except siwx.InvalidProofError as error:
+            return VerificationFailedError(error.code)
+        # Every offer on the proof's chain checks it with its own options, in order: its
+        # verifier and origin, then its nonce store, then its grant, so a later offer's
+        # policy can still grant the wallet. With none on that chain, the first offer
+        # rejects the proof as an unsupported chain.
+        candidates = [
+            entry for entry in offers if payload["chainId"] == f"eip155:{entry[1][1]}"
+        ] or offers[:1]
+        rejection: siwx.InvalidProofError | None = None
+        verified = False
+        granted_offer: tuple[_PreparedOffer, siwx.VerifiedProof] | None = None
+        # Stores this request already claimed the nonce in: offers sharing a store share the
+        # claim, so a later offer can still grant the wallet, and no claim is ever released.
+        claimed: list[object] = []
+        for candidate, (options, chain_id) in candidates:
+            try:
+                proof = await siwx.verify(
+                    chain_id=chain_id,
+                    origin=options.origin,
+                    store=options.store,
+                    payload=payload,
+                    verifier=options.verifier,
+                    claim_nonce=False,
+                )
+                verified = True
+                # Reserve the nonce before grant, so a replayed proof never reaches grant.
+                if not any(store is options.store for store in claimed):
+                    await siwx.claim(store=options.store, payload=payload)
+                    claimed.append(options.store)
+            except siwx.InvalidProofError as error:
+                if error.code == "invalid_siwx_nonce" and verified:
+                    return VerificationFailedError(error.code)
+                rejection = rejection or error
+                continue
+            result = options.grant(proof.address, proof.chain_id, request)
+            if inspect.isawaitable(result):
+                result = await result
+            granted = result is True
+            if granted:
+                granted_offer = (candidate, proof)
+                break
+        if granted_offer is None:
+            if not verified and rejection is not None:
+                return VerificationFailedError(rejection.code)
+            return None
+        offer, proof = granted_offer
+        challenge = await offer.verify(None)
+        if not isinstance(challenge, Challenge):
+            raise RuntimeError("offer without a credential returned a receipt")
+        call.settled = offer
+        receipt = Receipt.success(
+            reference=f"did:pkh:eip155:{proof.chain_id}:{proof.address}",
+            method=offer.offer.method.name,
+        )
+        return Credential(challenge=challenge.to_echo(), payload={}), receipt
+
+    @staticmethod
+    async def _identified(prepared: Sequence[_PreparedOffer], call: _Call) -> list[_PreparedOffer]:
+        """The prepared offers whose identity verifiers pass.
+
+        Raises:
+            IdentityRejectedError: The first offer's rejection, when every offer rejects.
+        """
+        kept: list[_PreparedOffer] = []
+        rejections: list[Rejected] = []
+        for offer in prepared:
+            outcome = await call.request_identity(offer.offer)
+            if isinstance(outcome, Rejected):
+                rejections.append(outcome)
+            else:
+                kept.append(offer)
+        if not kept and rejections:
+            raise IdentityRejectedError("request", rejections[0])
+        return kept
 
     async def _advertised(
         self, prepared: Sequence[_PreparedOffer], request: Request, call: _Call
@@ -634,7 +917,9 @@ class ComposedHandler:
         call: _Call,
     ) -> ComposedResult | None:
         """Pay the offer an x402 payload addresses, or return every challenge."""
-        prepared = [await _prepare_offer(offer, request, None, call) for offer in self._offers]
+        prepared = await self._identified(
+            [await _prepare_offer(offer, request, None, call) for offer in self._offers], call
+        )
         x402_offers = [offer for offer in prepared if isinstance(offer.intent, _X402MethodIntent)]
         if not x402_offers:
             return None
@@ -658,10 +943,14 @@ class ComposedHandler:
                 # Like a native credential, an x402 payment can only pay an offer
                 # this request would have advertised.
                 if any(offer is candidate for candidate in advertised):
+                    if offer.offer.identity.payment is not None:
+                        # An x402 payment names no Challenge a proof could bind to.
+                        raise IdentityRejectedError("payment", X402_REJECTED)
                     result = await offer.verify(None, x402)
-                    return (
-                        ComposedChallenges((result,)) if isinstance(result, Challenge) else result
-                    )
+                    if isinstance(result, Challenge):
+                        return ComposedChallenges((result,))
+                    call.settled = offer
+                    return result
             error = VerificationFailedError(
                 "x402 payment payload does not match route requirements"
             )
@@ -718,7 +1007,7 @@ class ComposedHandler:
                 if offer.body is None
                 else digest is not None and _body_digest.verify(digest, offer.body)
             )
-            and _application_meta(echoed_meta) == (offer.offer.meta or None)
+            and _application_meta(echoed_meta) == _application_meta(offer.offer.meta)
         ]
         authenticated_matches = [offer for offer in binding_matches if offer.offer.owns(credential)]
         if len(authenticated_matches) > 1:
@@ -792,17 +1081,91 @@ def _x402_accepts(call: _Call, challenge: Challenge) -> PaymentRequirements | No
     Composed servers may share a realm with different tokens: the issuing offer's
     method decides the EIP-712 domain.
     """
-    for prepared in call.prepared:
-        offer = prepared.offer
+    for prepared in _issuers(call, (challenge,)):
+        # A route with a payment check does not accept x402, so it does not offer it.
         if (
             isinstance(prepared.intent, _X402MethodIntent)
-            and offer.method.name == challenge.method
-            and offer.method.intent == challenge.intent
-            and offer.server.realm == challenge.realm
-            and prepared.request == challenge.request
+            and prepared.offer.identity.payment is None
         ):
             return prepared.intent.x402_requirements(challenge.request)
     return None
+
+
+def _siwx_reads_body(method: Any) -> bool:
+    """Whether a method's x402 ``sign-in-with-x`` grant reads the request body."""
+    options = getattr(getattr(method, "x402", None), "siwx", None)
+    return bool(getattr(options, "body", False))
+
+
+def _siwx_offer(offer: _PreparedOffer) -> tuple[SiwxOptions, int] | None:
+    """An offer's SIWX options and chain, when it accepts x402 ``sign-in-with-x``.
+
+    Like mppx, an offer whose route has a payment check doesn't: a proof carries no
+    Credential the check could vet.
+    """
+    intent = offer.intent
+    if not isinstance(intent, _X402MethodIntent) or offer.offer.identity.payment is not None:
+        return None
+    options = intent.siwx
+    chain_id = intent.siwx_chain_id(offer.request)
+    if options is None or chain_id is None:
+        return None
+    return options, chain_id
+
+
+def _x402_siwx(call: _Call, challenge: Challenge, url: str) -> siwx.Extension | None:
+    """Return the x402 ``sign-in-with-x`` extension of the offer that issued a challenge."""
+    for prepared in _issuers(call, (challenge,)):
+        accepted = _siwx_offer(prepared)
+        if accepted is not None:
+            options, chain_id = accepted
+            return siwx.create_extension(chain_id=chain_id, origin=options.origin, url=url)
+    return None
+
+
+def _issuers(
+    call: _Call, challenges: Sequence[Challenge], *, same_request: bool = True
+) -> list[_PreparedOffer]:
+    """The prepared offers that issued ``challenges`` (by method, intent and realm, and
+    unless ``same_request`` is False, request)."""
+    return [
+        prepared
+        for prepared in call.prepared
+        if any(
+            prepared.offer.method.name == challenge.method
+            and prepared.offer.method.intent == challenge.intent
+            and prepared.offer.server.realm == challenge.realm
+            and (not same_request or prepared.request == challenge.request)
+            for challenge in challenges
+        )
+    ]
+
+
+def _check_identity_composition(offers: Sequence[_Offer]) -> None:
+    """Refuse compositions where a Credential could skip a payment check.
+
+    A Credential names no offer, so it may reach any offer with the same terms: every offer
+    with a payment check must share it, and offers with the same terms must agree on having it.
+    """
+    checks = {id(offer.identity.payment) for offer in offers if offer.identity.payment is not None}
+    if len(checks) > 1:
+        raise TypeError("Offers in a composed route must use the same identity payment check.")
+    if not checks:
+        return
+    by_terms: dict[str, set[bool]] = {}
+    for offer in offers:
+        options = {k: v for k, v in offer.options.items() if k != "identity"}
+        terms = json.dumps(
+            [id(offer.server), offer.method.name, offer.method.intent, options],
+            sort_keys=True,
+            default=repr,
+        )
+        by_terms.setdefault(terms, set()).add(offer.identity.payment is not None)
+    if any(len(kinds) > 1 for kinds in by_terms.values()):
+        raise TypeError(
+            "A composed route cannot pair offers with the same payment terms where only one "
+            "has an identity payment check."
+        )
 
 
 def compose(*handlers: ComposedHandler) -> ComposedHandler:

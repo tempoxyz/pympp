@@ -17,9 +17,16 @@ from mpp import (
     Receipt,
     _body_digest,
     _constant_time_equal,
+    _credential_expiry,
     generate_challenge_id,
 )
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
+from mpp._parsing import (
+    MAX_AUTHORIZATION_SIZE,
+    ParseError,
+    _b64_decode,
+    is_valid_payment_method_id,
+    with_received_credential_header,
+)
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_dict, is_list
 from mpp._units import transform_units
@@ -49,8 +56,12 @@ class Intent(Protocol):
 async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) -> Receipt:
     """Run ``validate`` then ``broadcast`` when the intent has them, else ``verify``.
 
-    The validation's ``payer`` is copied to the receipt unless it already has one.
+    The validation's ``payer`` is copied to the receipt unless it already has one, and an
+    invalid receipt ``method`` is replaced by the credential's.
     """
+    # Imported here so this module's import list stays as on main.
+    from mpp._parsing import receipt_with_valid_method
+
     if hasattr(intent, "broadcast"):
         validation = await intent.validate(credential, request)
         if not isinstance(validation, Validation):
@@ -58,8 +69,10 @@ async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) 
         receipt: Receipt = await intent.broadcast(credential, request)
         if validation.payer is not None and receipt.payer is None:
             receipt = replace(receipt, payer=validation.payer)
-        return receipt
-    return await intent.verify(credential, request)
+        return receipt_with_valid_method(receipt, credential.challenge.method)
+    return receipt_with_valid_method(
+        await intent.verify(credential, request), credential.challenge.method
+    )
 
 
 async def verify_or_challenge(
@@ -127,6 +140,11 @@ async def verify_or_challenge(
         If Authorization is valid:
             A tuple of (Credential, Receipt) for the successful payment.
 
+    Raises:
+        ValueError: If ``method`` is not lowercase letters only. It is checked before any
+            Challenge is issued or any intent hook runs, so an x402 payment never settles
+            for a route whose Receipt could not be sent.
+
     Example:
         result = await verify_or_challenge(
             authorization=request.headers.get("Authorization"),
@@ -149,6 +167,12 @@ async def verify_or_challenge(
         )
     """
     method_name = method or "tempo"
+    # The x402 path builds its Credential from this name rather than parsing one, so check
+    # it here: a name the grammar rejects would only fail once the payment had settled.
+    if not is_valid_payment_method_id(method_name):
+        raise ValueError(
+            f"Invalid payment method name {method_name!r}: use lowercase letters only (a-z)."
+        )
     request = transform_units(request)
 
     # A direct intent left to fall back to an in-memory replay store would only fail
@@ -167,7 +191,8 @@ async def verify_or_challenge(
             realm,
             secret_key,
             description,
-            meta,
+            # Marks the challenge when the intent accepts some credentials past its expiry.
+            _credential_expiry.issuance_meta(intent, meta),
             expires,
             body,
             header,
@@ -314,7 +339,7 @@ async def verify_or_challenge(
             credential,
         )
 
-    if _application_meta(echo_opaque) != (meta or None):
+    if _application_meta(echo_opaque) != _application_meta(meta):
         return await fail(
             InvalidChallengeError(echo.id, "credential opaque does not match this route"),
             credential,
@@ -336,7 +361,9 @@ async def verify_or_challenge(
         # it to an aware "now" raises TypeError. Reject it like any other
         # unparseable value so the route still fails closed.
         return await fail(InvalidChallengeError(echo.id, "invalid expires"), credential)
-    if expires_dt <= datetime.now(UTC):
+    if _credential_expiry.is_expired(
+        expires_dt, datetime.now(UTC), _credential_expiry.grace_of(intent, credential)
+    ):
         return await fail(PaymentExpiredError(echo.expires), credential)
 
     submitted_challenge = _challenge_from_echo(echo, echo_request, echo_opaque)
@@ -548,7 +575,9 @@ def _challenge_from_echo(
     request: dict[str, Any],
     opaque: dict[str, str] | None,
 ) -> Challenge:
-    return Challenge(
+    # Keep the echoed spelling: this challenge can be re-issued for a retry, and its ID
+    # binds the header exactly as echoed.
+    challenge = Challenge(
         id=echo.id,
         realm=echo.realm,
         method=echo.method,
@@ -561,6 +590,7 @@ def _challenge_from_echo(
         header=echo.header,
         description=echo.description,
     )
+    return with_received_credential_header(challenge, echo.header)
 
 
 _PAYMENT_SCHEME_RE = re.compile(r"(?:^|,)[ \t]*payment ", re.IGNORECASE)
@@ -583,7 +613,9 @@ def _extract_payment_scheme(header: str) -> str | None:
 
 
 def _application_meta(meta: dict[str, str] | None) -> dict[str, str] | None:
-    """Remove the HMAC-authenticated issuance nonce for route comparison."""
+    """Remove the HMAC-authenticated issuance nonce and expiry grace marker for route
+    comparison."""
     if not isinstance(meta, dict):
         return None
-    return {key: value for key, value in meta.items() if key != "_mpp_nonce"} or None
+    reserved = ("_mpp_nonce", _credential_expiry.EXPIRY_GRACE_KEY)
+    return {key: value for key, value in meta.items() if key not in reserved} or None

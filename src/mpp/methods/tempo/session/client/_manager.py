@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mpp import AUTHORIZATION_HEADER, Challenge, Credential
-from mpp._parsing import ParseError
+from mpp._parsing import ParseError, is_legacy_unicode_escaped
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.events import CHALLENGE_RECEIVED
@@ -59,6 +59,7 @@ from mpp.methods.tempo.session.client._store import (
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
     from mpp.methods.tempo.client import AutoSwap
+    from mpp.methods.tempo.session._configurable import ConfigurableAccount
 
 PAYMENT_SESSION_HEADER = "Payment-Session"
 
@@ -78,6 +79,9 @@ def _zero_amount_charge(response: httpx.Response) -> Challenge | None:
             try:
                 challenge = Challenge.from_www_authenticate(value)
             except ParseError:
+                continue
+            if is_legacy_unicode_escaped(challenge):
+                # Its proof would sign a realm the challenge ID doesn't bind.
                 continue
             if challenge.method == "tempo" and challenge.intent == "charge":
                 return challenge if _is_zero_tempo_charge(challenge) else None
@@ -223,6 +227,7 @@ class SessionManager:
         transport: httpx.AsyncBaseTransport | None = None,
         bootstrap: bool = False,
         trusted_tempo_realms: Mapping[str, str] | None = None,
+        voucher_signer: ConfigurableAccount | None = None,
     ) -> None:
         from mpp.client.transport import PaymentTransport
 
@@ -245,6 +250,7 @@ class SessionManager:
             on_channel_update=self._on_channel_update,
             rpc_url=rpc_url,
             http_client=http_client,
+            voucher_signer=voucher_signer,
         )
         # The manager keeps its own transaction boundary (mppx unregisters the
         # response hook): opens are stored at once and rolled back on failure.
@@ -439,7 +445,11 @@ class SessionManager:
         if chain_id != snapshot.chain_id:
             raise ValueError(f"Chain ID mismatch: expected {snapshot.chain_id}, got {chain_id}.")
         entry, spent = await hydrate_session_snapshot(
-            self._account, snapshot, rpc_url=rpc_url, client=self._method.http_client
+            self._account,
+            snapshot,
+            rpc_url=rpc_url,
+            client=self._method.http_client,
+            voucher_signer=self._method.voucher_signer,
         )
         assert_voucher_within_local_limit(entry.cumulative_amount, self._max_voucher_cumulative)
         if await store_get(self._store, entry_key(entry)) is not None:
@@ -813,6 +823,7 @@ def session_manager(
     transport: httpx.AsyncBaseTransport | None = None,
     bootstrap: bool = False,
     trusted_tempo_realms: Mapping[str, str] | None = None,
+    voucher_signer: ConfigurableAccount | None = None,
 ) -> SessionManager:
     """Create a :class:`SessionManager` (mppx ``tempo.session.manager``).
 
@@ -850,4 +861,5 @@ def session_manager(
         transport=transport,
         bootstrap=bootstrap,
         trusted_tempo_realms=trusted_tempo_realms,
+        voucher_signer=voucher_signer,
     )

@@ -264,7 +264,8 @@ def pay(
     Converts the framework request to a :class:`Request`, runs the route handler, and
     returns its 402 challenge or calls the endpoint with ``(request, credential, receipt)``
     and attaches the receipt to its response. The endpoint **must** name the injected
-    parameters ``credential`` and ``receipt``.
+    parameters ``credential`` and ``receipt``. An endpoint with an ``identity`` parameter also
+    receives the route's verified identity (:class:`~mpp.identity.Results`).
 
     Example:
         mpp = Mpp(methods=tempo.charge(recipient="0x..."))
@@ -277,7 +278,9 @@ def pay(
 
     def decorator(endpoint: Callable[..., Awaitable[R]]) -> Callable[..., Awaitable[R | Any]]:
         sig = inspect.signature(endpoint)
-        params = [p for name, p in sig.parameters.items() if name not in ("credential", "receipt")]
+        injected = ("credential", "receipt", "identity")
+        params = [p for name, p in sig.parameters.items() if name not in injected]
+        wants_identity = "identity" in sig.parameters
         request_param_name = params[0].name if params else "request"
 
         @wraps(endpoint)
@@ -296,7 +299,8 @@ def pay(
             if result.response is not None:
                 # The payment method handled the request (a management action).
                 return to_framework_response(result.response)
-            response = await endpoint(request_obj, result.credential, result.receipt)
+            extra = {"identity": result.identity} if wants_identity else {}
+            response = await endpoint(request_obj, result.credential, result.receipt, **extra)
             return result.with_receipt(response)
 
         wrapper.__signature__ = sig.replace(parameters=params)  # type: ignore[attr-defined]

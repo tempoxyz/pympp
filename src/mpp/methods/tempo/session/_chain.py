@@ -22,6 +22,13 @@ from mpp._typing import is_dict, is_list
 from mpp.errors import BadRequestError, PaymentSimulationError, VerificationFailedError
 from mpp.methods.tempo.session import _abi as abi
 from mpp.methods.tempo.session._channel import compute_channel_id, expiring_nonce_hash
+from mpp.methods.tempo.session._configurable import (
+    CONFIGURABLE_ACCOUNT_ADDRESS,
+    ConfigurableAccount,
+    SignerConfigChangedError,
+    encode_get_config_commitment,
+    is_zero_hash,
+)
 from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     ZERO_ADDRESS,
@@ -255,6 +262,153 @@ def get_channel_event(
             f"expected one {name} event for credential channelId in receipt"
         )
     return matches[0]
+
+
+def get_opening_commitment(
+    receipt: Mapping[str, Any],
+    descriptor: ChannelDescriptor,
+    channel_id: str,
+    *,
+    escrow: str | None = None,
+) -> str | None:
+    """The TIP-1166 opening commitment an `open` receipt cached for `channel_id`, else None.
+
+    From T15 the escrow emits `OpeningCommitmentRecorded` when the channel's voucher signer has a
+    config commitment, which the salt must equal. No event means the opening commitment is zero.
+    """
+    logs = receipt.get("logs")
+    matches: list[dict[str, Any]] = []
+    for log in logs if is_list(logs) else []:
+        if not is_dict(log):
+            continue
+        if escrow is not None and str(log.get("address", "")).lower() != escrow.lower():
+            continue
+        topics = log.get("topics")
+        if (
+            not is_list(topics)
+            or not topics
+            or str(topics[0]).lower() != abi.EVENT_TOPICS["OpeningCommitmentRecorded"]
+        ):
+            continue
+        try:
+            event = abi.decode_event([str(t) for t in topics], str(log.get("data", "0x")))
+        except Exception:
+            event = None
+        if event is None:
+            # Skipping it could read a nonzero opening commitment as zero.
+            raise VerificationFailedError("undecodable OpeningCommitmentRecorded event in receipt")
+        if str(event.args["channelId"]).lower() == channel_id.lower():
+            matches.append(event.args)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise VerificationFailedError(
+            "expected at most one OpeningCommitmentRecorded event for credential channelId "
+            "in receipt"
+        )
+    signer = str(matches[0]["signer"])
+    commitment = str(matches[0]["commitment"]).lower()
+    expected_signer = descriptor.authorized_signer
+    if is_zero_hash(expected_signer):
+        expected_signer = descriptor.payer
+    if signer.lower() != expected_signer.lower():
+        raise VerificationFailedError("OpeningCommitmentRecorded signer does not match descriptor")
+    if commitment != descriptor.salt.lower() or is_zero_hash(commitment):
+        raise VerificationFailedError("OpeningCommitmentRecorded commitment does not match salt")
+    return commitment
+
+
+async def get_config_commitment(
+    rpc_url: str,
+    account: str,
+    *,
+    block: int | str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """The TIP-1107 config commitment of `account` (zero when it has none)."""
+    result = await _eth_call(
+        rpc_url, CONFIGURABLE_ACCOUNT_ADDRESS, encode_get_config_commitment(account), block, client
+    )
+    raw = bytes.fromhex(str(result).removeprefix("0x"))
+    if not raw:
+        # A chain without the configurable account precompile has no commitments.
+        return "0x" + "00" * 32
+    if len(raw) != 32:
+        raise ValueError("unexpected getConfigCommitment result")
+    return "0x" + raw.hex()
+
+
+async def verify_voucher_on_chain(
+    rpc_url: str,
+    descriptor: ChannelDescriptor,
+    cumulative_amount: int,
+    signature: str,
+    *,
+    escrow: str,
+    client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Whether the escrow's T15 verifyVoucher view accepts signature (TIP-1166).
+
+    The escrow checks it against the channel's opening commitment, so this decides a channel
+    whose opening commitment is not known here. Raises when the call fails.
+    """
+    data = abi.encode_verify_voucher(descriptor, cumulative_amount, signature)
+    return abi.decode_bool(await _eth_call(rpc_url, escrow, data, None, client))
+
+
+async def resolve_open_salt(
+    rpc_url: str,
+    signer: ConfigurableAccount,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """The default `open` salt for a configurable account voucher signer (TIP-1166).
+
+    From T15 the escrow requires the salt of a channel whose signer has a config commitment
+    to equal it, so this returns the signer's on-chain commitment. A signer that has not
+    registered a configuration yet has none: it signs with its version-zero config and the
+    salt stays random. The open is signed by the payer's own key (primitive or keychain),
+    never by the configurable account, so it cannot register the account (TIP-1107
+    registration runs only for a transaction the account signs with ``0x05``); the commitment
+    when the open executes is the one read here.
+    """
+    on_chain = await get_config_commitment(rpc_url, signer.address, client=client)
+    if not is_zero_hash(on_chain):
+        if int(on_chain, 16) != int(signer.commitment, 16):
+            raise ValueError(
+                f"Configurable account {signer.address} holds a config whose commitment "
+                f"{signer.commitment} does not match its on-chain commitment {on_chain}. "
+                "Use the account's current config."
+            )
+        return on_chain
+    if signer.config.version != 0:
+        raise ValueError(
+            f"Configurable account {signer.address} has no on-chain config, so it needs its "
+            "version-zero config to sign vouchers."
+        )
+    return "0x" + os.urandom(32).hex()
+
+
+def signer_config_error(error: BaseException) -> SignerConfigChangedError | None:
+    """Map a TIP-1166 `SignerConfigChanged` or `RootKeyRetired` revert to a typed error."""
+    from mpp.methods.tempo._rpc import RpcError
+
+    if not isinstance(error, RpcError):
+        return None
+    detail = error.response.get("error")
+    data: object = detail.get("data") if is_dict(detail) else None
+    if is_dict(data):
+        data = data.get("data")
+    if not isinstance(data, str):
+        return None
+    try:
+        raw = bytes.fromhex(data.removeprefix("0x"))
+    except ValueError:
+        return None
+    for reason in ("SignerConfigChanged", "RootKeyRetired"):
+        if raw[:4] == abi.ERROR_SELECTORS[reason] and len(raw) == 36:
+            return SignerConfigChangedError(signer="0x" + raw[16:36].hex(), reason=reason)
+    return None
 
 
 def _receipt_block(receipt: Mapping[str, Any]) -> int | None:
@@ -933,6 +1087,8 @@ class BroadcastOpenResult:
     state: ChannelState
     expiring_nonce_hash: str
     open_deposit: int
+    opening_commitment: str | None = None
+    """TIP-1166 config commitment the escrow cached for the signer at open, if it had one."""
 
 
 async def broadcast_open_transaction(
@@ -958,7 +1114,8 @@ async def broadcast_open_transaction(
     """Validate, broadcast and verify a client-signed `open` transaction.
 
     Checks the `ChannelOpened` event against the calldata and credential, then
-    reads the channel back at the receipt's block.
+    reads the channel back at the receipt's block. A `OpeningCommitmentRecorded` event
+    (TIP-1166) for the channel becomes the result's `opening_commitment`.
     """
     validated = validate_open_credential_transaction(
         serialized_transaction=serialized_transaction,
@@ -1005,6 +1162,9 @@ async def broadcast_open_transaction(
         expected_channel_id=expected_channel_id,
         open_deposit=validated.open_deposit,
     )
+    opening_commitment = get_opening_commitment(
+        receipt, validated.descriptor, expected_channel_id, escrow=escrow_contract
+    )
     block = _receipt_block(receipt)
     channel = await readback_with_retry(
         lambda: get_channel(
@@ -1018,6 +1178,7 @@ async def broadcast_open_transaction(
         state=channel.state,
         expiring_nonce_hash=opened["expiringNonceHash"],
         open_deposit=validated.open_deposit,
+        opening_commitment=opening_commitment,
     )
 
 
@@ -1103,28 +1264,36 @@ async def _estimate_gas(
     *,
     valid_before: int,
     required: bool = False,
+    key_id: str | None = None,
+    payment: bool = False,
 ) -> int:
-    """Estimated gas plus headroom; ``required`` raises instead of using the default limit."""
+    """Estimated gas plus headroom; ``required`` raises instead of using the default limit.
+
+    ``key_id`` names the access key that signs for ``sender``, so the node checks its
+    spending limits. With ``payment``, a spending-limit or balance revert raises
+    ``SpendingLimitExceededError`` or ``InsufficientBalanceError`` (mppx#1293).
+    """
+    request: dict[str, Any] = {
+        "from": sender,
+        "calls": [{"to": to, "value": "0x0", "data": data} for to, data in calls],
+        "nonceKey": hex(EXPIRING_NONCE_KEY),
+        # Expiring-nonce transactions must carry validBefore to execute.
+        "validBefore": hex(valid_before),
+    }
+    if key_id is not None:
+        request["keyId"] = key_id
     try:
-        estimated = int(
-            await _rpc(
-                rpc_url,
-                "eth_estimateGas",
-                [
-                    {
-                        "from": sender,
-                        "calls": [{"to": to, "value": "0x0", "data": data} for to, data in calls],
-                        "nonceKey": hex(EXPIRING_NONCE_KEY),
-                        # Expiring-nonce transactions must carry validBefore to execute.
-                        "validBefore": hex(valid_before),
-                    },
-                    "latest",
-                ],
-                client,
-            ),
-            16,
-        )
-    except Exception:
+        estimated = int(await _rpc(rpc_url, "eth_estimateGas", [request, "latest"], client), 16)
+    except Exception as error:
+        mapped = signer_config_error(error)
+        if mapped is not None:
+            raise mapped from error
+        if payment:
+            from mpp.methods.tempo._simulation import simulation_error
+
+            simulated = simulation_error(error, account=sender, access_key=key_id)
+            if simulated is not None:
+                raise simulated from error
         if required:
             raise
         return DEFAULT_GAS_LIMIT
@@ -1146,6 +1315,7 @@ async def _build_signed_transaction(
     client: httpx.AsyncClient | None,
     estimate_required: bool = False,
     payer_fee_policy: Mapping[str, int] | None = None,
+    payment: bool = False,
 ) -> tuple[Any, int]:
     """Build and sender-sign an expiring-nonce Tempo transaction; returns (tx, chain_id)."""
     # pytempo ships no type information.
@@ -1171,8 +1341,17 @@ async def _build_signed_transaction(
         raise FeePolicyError("RPC gas-price quote exceeds payer fee policy")
     priority_fee = min(gas_price, policy.max_priority_fee_per_gas)
     valid_before = valid_before or int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
+    # Preparation estimates gas, which simulates the calls as the signing key, so a payment the
+    # key's spending limit or the account's balance cannot cover fails here, before signing.
     gas_limit = await _estimate_gas(
-        rpc_url, sender, calls, client, valid_before=valid_before, required=estimate_required
+        rpc_url,
+        sender,
+        calls,
+        client,
+        valid_before=valid_before,
+        required=estimate_required,
+        key_id=account.address if root_account is not None else None,
+        payment=payment,
     )
     if not awaiting_fee_payer and gas_limit * gas_price > policy.max_total_fee:
         raise FeePolicyError("Transaction exceeds payer total-fee budget")
@@ -1232,6 +1411,7 @@ async def build_open_transaction(
     root_account: str | None = None,
     valid_before: int | None = None,
     client: httpx.AsyncClient | None = None,
+    voucher_signer: Any = None,
 ) -> tuple[str, ChannelDescriptor, str]:
     """Build and sign an expiring-nonce `open` transaction (mppx `createOpenPayload`).
 
@@ -1240,10 +1420,21 @@ async def build_open_transaction(
     to `account` (the access key, when one signs). With `fee_payer`, `raw_tx` is
     a 0x78 fee payer envelope for the server to co-sign. The fee token defaults
     to `token`. `prefix_calls` are `(to, data)` calls run first, such as an auto-swap.
+
+    `voucher_signer`, when given, is the channel's authorized signer. When it is a TIP-1166
+    `ConfigurableAccount`, the salt defaults to its on-chain config commitment (T15
+    requires it), else the salt is random. An explicit `salt` always wins.
     """
     payer = root_account or account.address
+    if voucher_signer is not None and authorized_signer is None:
+        authorized_signer = str(voucher_signer.address)
     signer = authorized_signer or account.address
+    if salt is None and isinstance(voucher_signer, ConfigurableAccount):
+        salt = await resolve_open_salt(rpc_url, voucher_signer, client=client)
     channel_salt = salt or "0x" + os.urandom(32).hex()
+    # A fixed salt (such as a signer's config commitment) no longer tells apart two opens with
+    # the same parameters built in the same second, so vary the transaction's valid_after.
+    open_valid_after = None if salt is None else _random_valid_after()
     open_data = abi.encode_open(
         payee=payee,
         operator=operator,
@@ -1261,8 +1452,9 @@ async def build_open_transaction(
         awaiting_fee_payer=fee_payer,
         root_account=root_account,
         valid_before=valid_before,
-        valid_after=None,
+        valid_after=open_valid_after,
         client=client,
+        payment=True,
     )
     raw_tx = _serialize_client_transaction(signed, fee_payer)
     descriptor = ChannelDescriptor(
@@ -1295,20 +1487,28 @@ async def build_top_up_transaction(
 ) -> str:
     """Build and sign an expiring-nonce `topUp` transaction (mppx `createTopUpPayload`).
 
-    Uses a random past `valid_after` so identical top-ups stay distinct.
+    Uses a random past `valid_after` so identical top-ups stay distinct. Raises
+    `SignerConfigChangedError` when the escrow refuses the top-up because the channel's
+    voucher signer changed its configuration (TIP-1166).
     """
-    signed, _ = await _build_signed_transaction(
-        account,
-        [*prefix_calls, (escrow, abi.encode_top_up(descriptor, additional_deposit))],
-        rpc_url=rpc_url,
-        chain_id=chain_id,
-        fee_token=fee_token or descriptor.token,
-        awaiting_fee_payer=fee_payer,
-        root_account=root_account,
-        valid_before=valid_before,
-        valid_after=_random_valid_after(),
-        client=client,
-    )
+    try:
+        signed, _ = await _build_signed_transaction(
+            account,
+            [*prefix_calls, (escrow, abi.encode_top_up(descriptor, additional_deposit))],
+            rpc_url=rpc_url,
+            chain_id=chain_id,
+            fee_token=fee_token or descriptor.token,
+            awaiting_fee_payer=fee_payer,
+            root_account=root_account,
+            valid_before=valid_before,
+            valid_after=_random_valid_after(),
+            client=client,
+            payment=True,
+        )
+    except SignerConfigChangedError as error:
+        if chain_id is not None and error.channel_id is None:
+            error.channel_id = compute_channel_id(descriptor, chain_id=chain_id, escrow=escrow)
+        raise
     return _serialize_client_transaction(signed, fee_payer)
 
 

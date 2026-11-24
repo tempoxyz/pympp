@@ -172,6 +172,17 @@ class TestProof:
         assert not verify_proof("0xzz", account=PAYER.address, **verify)
         assert not verify_proof(signature, account="not-an-address", **verify)
 
+    def test_accepts_high_s_proofs(self) -> None:
+        n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        raw = bytes.fromhex(
+            sign_proof(PAYER, chain_id=CHAIN_ID, challenge_id="c", realm="r").removeprefix("0x")
+        )
+        s = int.from_bytes(raw[32:64], "big")
+        high_s = "0x" + (raw[:32] + (n - s).to_bytes(32, "big") + bytes([55 - raw[64]])).hex()
+        assert verify_proof(
+            high_s, account=PAYER.address, chain_id=CHAIN_ID, challenge_id="c", realm="r"
+        )
+
     def test_pkh_sources(self) -> None:
         assert parse_pkh_source(SOURCE) == (PAYER.address, CHAIN_ID)
         for bad in ("did:pkh:eip155:01:" + PAYER.address, "did:pkh:eip155:1:0x12", "x"):
@@ -723,7 +734,11 @@ def on_chain(
     async def get_channel_state(*_: Any, **__: Any) -> chain.ChannelState:
         return chain.ChannelState(settled=settled, deposit=deposit, close_requested_at=closing)
 
+    async def get_config_commitment(*_: Any, **__: Any) -> str:
+        return "0x" + "00" * 32
+
     monkeypatch.setattr(chain, "get_channel_state", get_channel_state)
+    monkeypatch.setattr(chain, "get_config_commitment", get_config_commitment)
 
 
 OTHER_ID = "0x" + "77" * 32
@@ -747,6 +762,29 @@ class TestHydrate:
         assert spent == 100
         assert (entry.channel_id, entry.cumulative_amount, entry.deposit) == (CHANNEL_ID, 400, 1000)
         assert entry.opened and entry.descriptor == DESCRIPTOR and entry.chain_id == CHAIN_ID
+
+    async def test_asks_the_escrow_once_the_signer_has_a_config_commitment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The channel may have opened under that commitment, where the escrow refuses
+        # a primitive voucher.
+        on_chain(monkeypatch, settled=400)
+        verdicts: list[bool] = []
+
+        async def get_config_commitment(*_: Any, **__: Any) -> str:
+            return "0x" + "c0" * 32
+
+        async def verify_voucher_on_chain(*_: Any, **__: Any) -> bool:
+            return verdicts.pop()
+
+        monkeypatch.setattr(chain, "get_config_commitment", get_config_commitment)
+        monkeypatch.setattr(chain, "verify_voucher_on_chain", verify_voucher_on_chain)
+        verdicts.append(False)
+        with pytest.raises(ValueError, match="not valid for its channel"):
+            await hydrate_session_snapshot(PAYER, snapshot(), rpc_url=RPC)
+        verdicts.append(True)
+        entry, _ = await hydrate_session_snapshot(PAYER, snapshot(), rpc_url=RPC)
+        assert entry.cumulative_amount == 400
 
     @pytest.mark.parametrize(
         ("account", "change", "state", "message"),

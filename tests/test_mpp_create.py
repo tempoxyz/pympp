@@ -11,7 +11,7 @@ import pytest
 
 from mpp.methods.tempo import server as tempo_server
 from mpp.server import Mpp
-from tests import challenge, http_request
+from tests import challenge, http_request, server_method
 
 
 class TestMppCreate:
@@ -76,6 +76,43 @@ class TestMppCreate:
                 secret_key="test-secret-0123456789abcdef0123456789abcdef",
             )
             assert srv.realm == "api.onrender.com"
+
+    def test_create_rejects_realm_above_latin1(self) -> None:
+        with pytest.raises(ValueError, match="Invalid realm"):
+            Mpp(
+                methods=tempo_server.charge(),
+                realm="merchant\u2014api.example.com",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
+            )
+
+    def test_create_rejects_detected_realm_above_latin1(self) -> None:
+        with (
+            patch.dict(os.environ, {"MPP_REALM": "merchant\u2014api.example.com"}, clear=True),
+            pytest.raises(ValueError, match="Invalid realm"),
+        ):
+            Mpp(
+                methods=tempo_server.charge(),
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
+            )
+
+    def test_create_rejects_intent_above_latin1(self) -> None:
+        method = server_method(
+            name="custom", intent="charge\u2014premium", verify=lambda *_args: None
+        )
+        with pytest.raises(ValueError, match="Invalid payment intent"):
+            Mpp(
+                methods=method,
+                realm="api.example.com",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
+            )
+
+    def test_create_accepts_latin1_realm(self) -> None:
+        srv = Mpp(
+            methods=tempo_server.charge(),
+            realm="caf\u00e9.example.com",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
+        )
+        assert srv.realm == "caf\u00e9.example.com"
 
     def test_create_requires_secret_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

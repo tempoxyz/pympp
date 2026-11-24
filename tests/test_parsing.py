@@ -10,14 +10,33 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from mpp import Challenge, ChallengeEcho, Credential, Receipt
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, MAX_HEADER_PAYLOAD_SIZE, ParseError
+from mpp._parsing import (
+    MAX_AUTHORIZATION_SIZE,
+    MAX_HEADER_PAYLOAD_SIZE,
+    ParseError,
+    _unescape_quoted_text,
+    is_legacy_unicode_escaped,
+    parse_formatted_description,
+)
+from mpp.errors import LegacyUnicodeEscapedChallengeError
 from mpp.server.verify import _extract_payment_scheme
 from tests import make_credential
 
-INVALID_PAYMENT_METHOD_IDS = ("Tempo", "tempo.pay", "2tempo", "-tempo", "tempo pay")
-# mppx's grammar (^[a-z][a-z0-9:_-]*$) allows digits, colons, underscores and
-# hyphens after a leading lowercase letter.
-VALID_EXTENDED_PAYMENT_METHOD_IDS = ("tempo2", "tempo-pay", "tempo_pay", "vendor:method", "x402")
+# The spec grammar is payment-method-id = 1*LOWERALPHA: lowercase a-z only.
+INVALID_PAYMENT_METHOD_IDS = (
+    "Tempo",
+    "TEMPO",
+    "tempo.pay",
+    "2tempo",
+    "-tempo",
+    "tempo pay",
+    "tempo2",
+    "tempo-pay",
+    "tempo_pay",
+    "vendor:method",
+    "x402",
+    "a1:b_2-c",
+)
 
 
 def _b64_json(data: Mapping[str, object]) -> str:
@@ -75,6 +94,15 @@ class TestChallenge:
         with pytest.raises(ParseError):
             Challenge.from_www_authenticate(header)
 
+    @pytest.mark.parametrize("request_b64", ["e3....0", "e30....", "e3!!!!0", "e3 0", "e3==0"])
+    def test_parse_rejects_non_base64url_request(self, request_b64: str) -> None:
+        header = (
+            'Payment id="test", realm="test", method="tempo", '
+            f'intent="charge", request="{request_b64}"'
+        )
+        with pytest.raises(ParseError, match="Invalid base64"):
+            Challenge.from_www_authenticate(header)
+
     def test_parse_non_dict_json(self) -> None:
         """Should reject JSON that decodes to non-dict in request field."""
         import base64
@@ -105,15 +133,20 @@ class TestChallenge:
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Challenge.from_www_authenticate(header)
 
-    @pytest.mark.parametrize("method", VALID_EXTENDED_PAYMENT_METHOD_IDS)
-    def test_parse_accepts_extended_charset_method_id(self, method: str) -> None:
-        header = (
-            f'Payment id="test", realm="api.example.com", method="{method}", '
-            'intent="charge", request="e30"'
-        )
+    @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
+    def test_format_rejects_invalid_method_id(self, method: str) -> None:
+        challenge = Challenge(id="test", method=method, intent="charge", request={})
 
-        challenge = Challenge.from_www_authenticate(header)
-        assert challenge.method == method
+        with pytest.raises(ParseError, match="Invalid payment method id"):
+            challenge.to_www_authenticate("api.example.com")
+
+    @pytest.mark.parametrize("method", ["tempo", "stripe", "evm", "custompay"])
+    def test_lowercase_method_id_roundtrips(self, method: str) -> None:
+        challenge = Challenge(id="test", method=method, intent="charge", request={})
+
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert Challenge.from_www_authenticate(header).method == method
 
     @pytest.mark.parametrize(
         "header",
@@ -124,13 +157,49 @@ class TestChallenge:
             'intent="charge", request="e30"',
             'Payment id="test", realm="api.example.com", method="tempo", '
             'intent="charge", request="e30", description="unterminated',
+            'Payment id="test", method="tempo", intent="charge", request="e30", '
+            'realm="Example API\\"',
+            'Payment id="test", realm="p"ay.example.com, method="tempo", '
+            'intent="charge", request="e30"',
+            'Payment id="test", method="tempo", intent="charge", request="e30", '
+            'realm="p"ay.example.com:8443"',
+            'Payment method="tempo" realm="api.example.com" intent="charge" '
+            'request="e30" id="test"',
+            'Payment id=test realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30"',
+            'Payment id="test", realm=api example, method="tempo", intent="charge", request="e30"',
         ],
-        ids=["junk", "missing-name", "unterminated"],
+        ids=[
+            "junk",
+            "missing-name",
+            "unterminated",
+            "trailing-backslash",
+            "text-after-quote",
+            "text-after-final-quote",
+            "whitespace-separated",
+            "whitespace-after-token",
+            "whitespace-in-token",
+        ],
     )
     def test_parse_rejects_malformed_auth_params(self, header: str) -> None:
-        """Like mppx, a position that cannot begin an auth-param fails parsing."""
+        """A position that cannot begin an auth-param fails parsing, and auth-params
+        must be separated by OWS "," OWS."""
         with pytest.raises(ParseError):
             Challenge.from_www_authenticate(header)
+
+    def test_parse_accepts_whitespace_around_separators(self) -> None:
+        header = (
+            'Payment id="test" ,realm=api.example.com ,  method=tempo\t,'
+            'intent="charge",,request="e30"  '
+        )
+
+        challenge = Challenge.from_www_authenticate(header)
+        assert (challenge.id, challenge.realm, challenge.method, challenge.intent) == (
+            "test",
+            "api.example.com",
+            "tempo",
+            "charge",
+        )
 
     def test_parse_stops_at_next_auth_scheme(self) -> None:
         header = (
@@ -294,11 +363,11 @@ class TestChallenge:
     @pytest.mark.parametrize(
         ("escaped", "expected"),
         [
-            (r"em dash \u2014 and coffee \u2615", "em dash — and coffee ☕"),
-            (r"grinning \ud83d\ude00 face", "grinning 😀 face"),
+            (r"em dash \u2014 and coffee \u2615", "em dash u2014 and coffee u2615"),
+            (r"grinning \ud83d\ude00 face", "grinning ud83dude00 face"),
             ("café naïve", "café naïve"),
-            (r"lone \ud83d here", "lone \ufffd here"),
-            (r"lone \ude00 here", "lone \ufffd here"),
+            (r"lone \ud83d here", "lone ud83d here"),
+            (r"lone \ude00 here", "lone ude00 here"),
             (r"not an escape \\u2014", r"not an escape \u2014"),
             (r"short \u12 tail", "short u12 tail"),
         ],
@@ -323,7 +392,84 @@ class TestChallenge:
         header = challenge.to_www_authenticate("api.example.com")
 
         assert 'description="Payment \\u2014 coffee \\u2615 \\ud83d\\ude00"' in header
-        assert Challenge.from_www_authenticate(header).description == challenge.description
+        # Quoted-pair semantics: the escapes are not decoded on parse.
+        assert (
+            Challenge.from_www_authenticate(header).description
+            == "Payment u2014 coffee u2615 ud83dude00"
+        )
+
+    def test_unicode_escape_in_realm_is_a_quoted_pair(self) -> None:
+        header = (
+            'Payment id="ch_unicode_realm", realm="merchant\\u2014api.example.com", '
+            'method="tempo", intent="charge", request="e30"'
+        )
+
+        assert Challenge.from_www_authenticate(header).realm == "merchantu2014api.example.com"
+
+    @pytest.mark.parametrize(
+        ("params", "legacy"),
+        [
+            ('realm="caf\\u00e9.example.com"', True),
+            ('realm="merchant\\u2014api.example.com"', True),
+            ('realm="caf\\u00E9.example.com"', True),
+            ('realm="api.example.com", digest="sha-256=\\u00e9"', True),
+            # Only parameters the challenge ID binds count, as in mppx.
+            ('realm="api.example.com", ext="\\u00e9"', False),
+            ('realm="say \\"hi\\" \\\\ api.example.com"', False),
+            # An escaped backslash followed by u00e9 is a literal backslash, not an escape.
+            ('realm="caf\\\\u00e9.example.com"', False),
+            ('realm="caf\\u00g9.example.com"', False),
+            ('realm="caf\\u00e"', False),
+            ('realm="api.example.com", description="caf\\u00e9 \\u2014"', False),
+        ],
+    )
+    def test_flags_legacy_unicode_escapes_in_bound_params(self, params: str, legacy: bool) -> None:
+        header = f'Payment id="x", {params}, method="tempo", intent="charge", request="e30"'
+
+        challenge = Challenge.from_www_authenticate(header)
+
+        assert is_legacy_unicode_escaped(challenge) is legacy
+
+    def test_legacy_flag_is_not_part_of_the_challenge(self) -> None:
+        header = (
+            'Payment id="x", realm="caf\\u00e9.example.com", method="tempo", '
+            'intent="charge", request="e30"'
+        )
+        legacy = Challenge.from_www_authenticate(header)
+        plain = replace(legacy, _legacy_unicode_escape=False)
+
+        assert is_legacy_unicode_escaped(legacy)
+        assert not is_legacy_unicode_escaped(plain)
+        assert legacy.realm == "cafu00e9.example.com"
+        assert legacy == plain
+        assert "legacy" not in repr(legacy)
+        # Re-serializing a flagged challenge would hide the misread value.
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            legacy.to_www_authenticate(legacy.realm)
+        assert plain.to_www_authenticate(plain.realm)
+        assert legacy.to_echo() == plain.to_echo()
+
+    @pytest.mark.parametrize("field", ["id", "realm", "intent", "digest"])
+    def test_format_rejects_non_latin1_in_bound_params(self, field: str) -> None:
+        values = {"id": "test", "realm": "api.example.com", "intent": "charge", "digest": None}
+        values[field] = "merchant—api"
+        challenge = Challenge(
+            id=values["id"],
+            method="tempo",
+            intent=values["intent"],
+            request={},
+            digest=values["digest"],
+        )
+
+        with pytest.raises(ParseError, match="outside Latin-1"):
+            challenge.to_www_authenticate(values["realm"])
+
+    def test_format_keeps_latin1_in_realm(self) -> None:
+        challenge = Challenge(id="test", method="tempo", intent="charge", request={})
+
+        header = challenge.to_www_authenticate("café.example.com")
+
+        assert Challenge.from_www_authenticate(header).realm == "café.example.com"
 
     def test_www_authenticate_roundtrip_preserves_credential_header(self) -> None:
         challenge = Challenge.create(
@@ -356,15 +502,46 @@ class TestChallenge:
         assert "header=" not in header
         assert challenge.header is None
 
-    def test_parse_www_authenticate_rejects_invalid_header_name(self) -> None:
+    @pytest.mark.parametrize(
+        ("header_param", "expected"),
+        [
+            (None, None),
+            ('header="Payment-Authorization"', "Payment-Authorization"),
+            ('header="payment-authorization"', "payment-authorization"),
+            ('header="PAYMENT-AUTHORIZATION"', "PAYMENT-AUTHORIZATION"),
+            ('header="Authorization"', ParseError),
+            ('header=""', ParseError),
+            ('header="X-Payment"', ParseError),
+            ('header="not a header"', ParseError),
+        ],
+    )
+    def test_parse_www_authenticate_credential_header(
+        self, header_param: str | None, expected: str | type[ParseError] | None
+    ) -> None:
+        """A received challenge may only omit header or select Payment-Authorization."""
         request_b64 = _b64_json({"amount": "1000000"})
         header = (
             'Payment id="abc", realm="api.example.com", method="tempo", '
-            f'intent="charge", request="{request_b64}", header="not a header"'
+            f'intent="charge", request="{request_b64}"'
         )
+        if header_param is not None:
+            header += f", {header_param}"
 
-        with pytest.raises(ParseError, match="Invalid HTTP header name"):
-            Challenge.from_www_authenticate(header)
+        if expected is ParseError:
+            with pytest.raises(ParseError, match="Unsupported credential header") as info:
+                Challenge.from_www_authenticate(header)
+            assert "X-Payment" not in str(info.value)
+            return
+        parsed = Challenge.from_www_authenticate(header)
+        # The parsed challenge keeps the issuer's spelling; only the field is canonical.
+        assert parsed.header == expected
+        field = "Payment-Authorization" if expected else "Authorization"
+        assert parsed.credential_header == field
+        assert parsed.to_echo().header == expected
+        if expected is not None:
+            assert f'header="{expected}"' in parsed.to_www_authenticate("api.example.com")
+            echoed = Credential(challenge=parsed.to_echo(), payload={}).to_authorization()
+            assert Credential.from_authorization(echoed).challenge.header == expected
 
 
 class TestCredential:
@@ -424,7 +601,10 @@ class TestCredential:
         data = {
             "challenge": {
                 "id": "test",
+                "realm": "api.example.com",
                 "method": "tempo",
+                "intent": "charge",
+                "request": "e30",
                 "description": description,
             },
             "payload": {},
@@ -434,7 +614,14 @@ class TestCredential:
 
     def test_accepts_tab_in_description(self) -> None:
         data = {
-            "challenge": {"id": "test", "method": "tempo", "description": "a\tb"},
+            "challenge": {
+                "id": "test",
+                "realm": "api.example.com",
+                "method": "tempo",
+                "intent": "charge",
+                "request": "e30",
+                "description": "a\tb",
+            },
             "payload": {},
         }
         credential = Credential.from_authorization("Payment " + _b64_json(data))
@@ -520,6 +707,54 @@ class TestCredential:
         with pytest.raises(ParseError, match="Credential challenge missing required field: id"):
             Credential.from_authorization(header)
 
+    @pytest.mark.parametrize("field", ["id", "realm", "method", "intent", "request"])
+    @pytest.mark.parametrize("value", [None, 1, True, ["x"], {"x": "y"}, "missing"])
+    def test_parse_rejects_missing_or_non_string_echo_fields(
+        self, field: str, value: object
+    ) -> None:
+        """Like mppx's ChallengeEcho schema, required echo fields are strings."""
+        challenge: dict[str, object] = {
+            "id": "test-id",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": "e30",
+        }
+        if value == "missing":
+            del challenge[field]
+        else:
+            challenge[field] = value
+        header = "Payment " + _b64_json({"challenge": challenge, "payload": {}})
+
+        with pytest.raises(ParseError, match="Credential challenge (missing required )?field"):
+            Credential.from_authorization(header)
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda token: f'"{token}"',
+            lambda token: token[:12] + "...." + token[12:],
+            lambda token: token[:12] + "!!!!" + token[12:],
+            lambda token: token[:12] + "    " + token[12:],
+            lambda token: token[:12] + "++++" + token[12:],
+            lambda token: token[:12] + "////" + token[12:],
+            lambda token: token[:12] + "====" + token[12:],
+        ],
+        ids=["quoted", "dots", "bangs", "spaces", "plus", "slash", "inner-padding"],
+    )
+    def test_parse_rejects_non_base64url_characters(self, mutate) -> None:
+        token = make_credential({"k": "v"}).to_authorization().removeprefix("Payment ")
+
+        with pytest.raises(ParseError, match="Invalid base64"):
+            Credential.from_authorization("Payment " + mutate(token))
+
+    def test_parse_accepts_trailing_padding(self) -> None:
+        credential = make_credential({"k": "v"})
+        token = credential.to_authorization().removeprefix("Payment ")
+
+        padded = Credential.from_authorization("Payment " + token + "=" * (-len(token) % 4))
+        assert padded.challenge.id == credential.challenge.id
+
     @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
     def test_parse_rejects_invalid_challenge_method_id(self, method: str) -> None:
         data = {
@@ -536,22 +771,6 @@ class TestCredential:
 
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Credential.from_authorization(header)
-
-    @pytest.mark.parametrize("method", VALID_EXTENDED_PAYMENT_METHOD_IDS)
-    def test_parse_accepts_extended_charset_challenge_method_id(self, method: str) -> None:
-        data = {
-            "challenge": {
-                "id": "test-id",
-                "realm": "api.example.com",
-                "method": method,
-                "intent": "charge",
-                "request": "e30",
-            },
-            "payload": {},
-        }
-
-        credential = Credential.from_authorization("Payment " + _b64_json(data))
-        assert credential.challenge.method == method
 
     def test_roundtrip_with_optional_challenge_fields(self) -> None:
         credential = Credential(
@@ -690,6 +909,13 @@ class TestReceipt:
         assert receipt.reference == "0xabc123"
         assert isinstance(receipt.timestamp, datetime)
         assert receipt.timestamp.tzinfo is not None
+
+    @pytest.mark.parametrize("inserted", ["....", "====", "!!!!", "++++", "////", "    "])
+    def test_parse_rejects_non_base64url_characters(self, inserted: str) -> None:
+        header = Receipt.success("0xabc").to_payment_receipt()
+
+        with pytest.raises(ParseError, match="Invalid base64"):
+            Receipt.from_payment_receipt(header[:8] + inserted + header[8:])
 
     def test_parse_invalid_status(self) -> None:
         """Should reject invalid status values."""
@@ -887,16 +1113,17 @@ class TestReceipt:
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Receipt.from_payment_receipt(b64)
 
-    @pytest.mark.parametrize("method", VALID_EXTENDED_PAYMENT_METHOD_IDS)
-    def test_parse_accepts_extended_charset_method_id(self, method: str) -> None:
-        payload = {
-            "status": "success",
-            "timestamp": "2024-01-20T12:00:00Z",
-            "reference": "0xabc",
-            "method": method,
-        }
+    @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
+    def test_format_rejects_invalid_method_id(self, method: str) -> None:
+        receipt = Receipt(
+            status="success",
+            timestamp=datetime(2024, 1, 20, 12, 0, tzinfo=UTC),
+            reference="0xabc",
+            method=method,
+        )
 
-        assert Receipt.from_payment_receipt(_b64_json(payload)).method == method
+        with pytest.raises(ParseError, match="Invalid payment method id"):
+            receipt.to_payment_receipt()
 
 
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
@@ -974,28 +1201,36 @@ class TestEncodingBoundaries:
         ],
         ids=["latin1-max", "bmp-min", "bmp-max", "astral-min", "astral-max"],
     )
-    def test_escape_quoted_boundaries(self, raw: str, escaped: str) -> None:
-        from mpp._parsing import _escape_quoted, _unescape_quoted
+    def test_escape_quoted_text_boundaries(self, raw: str, escaped: str) -> None:
+        from mpp._parsing import _escape_quoted_text, _unescape_quoted
 
-        assert _escape_quoted(raw) == escaped
-        assert _unescape_quoted(escaped) == raw
+        assert _escape_quoted_text(raw) == escaped
+        assert _unescape_quoted(escaped) == escaped.replace("\\", "")
+
+    @pytest.mark.parametrize("raw", ["\u0100", "\uffff", "\U00010000", "\U0010ffff"])
+    def test_escape_quoted_rejects_non_latin1(self, raw: str) -> None:
+        from mpp._parsing import _escape_quoted
+
+        assert _escape_quoted("\u00ff") == "\u00ff"
+        with pytest.raises(ParseError, match="outside Latin-1"):
+            _escape_quoted(raw)
 
     @pytest.mark.parametrize(
         ("escaped", "raw"),
         [
-            ("\\ud7ff", "\ud7ff"),
-            ("\\ue000", "\ue000"),
-            ("\\ud800\\udc00", "\U00010000"),
-            ("\\udbff\\udfff", "\U0010ffff"),
-            ("\\ud800", "\ufffd"),
-            ("\\udbff", "\ufffd"),
-            ("\\udc00", "\ufffd"),
-            ("\\udfff", "\ufffd"),
-            ("\\ud800\\ud800", "\ufffd\ufffd"),
-            ("\\ud800\\ue000", "\ufffd\ue000"),
-            ("\\udbffx", "\ufffdx"),
-            ("\\ud800\\x", "\ufffdx"),
-            ("\\ud800\\udc0", "\ufffdudc0"),
+            ("\\ud7ff", "ud7ff"),
+            ("\\ue000", "ue000"),
+            ("\\ud800\\udc00", "ud800udc00"),
+            ("\\udbff\\udfff", "udbffudfff"),
+            ("\\ud800", "ud800"),
+            ("\\udbff", "udbff"),
+            ("\\udc00", "udc00"),
+            ("\\udfff", "udfff"),
+            ("\\ud800\\ud800", "ud800ud800"),
+            ("\\ud800\\ue000", "ud800ue000"),
+            ("\\udbffx", "udbffx"),
+            ("\\ud800\\x", "ud800x"),
+            ("\\ud800\\udc0", "ud800udc0"),
             ("\\u12", "u12"),
             ("\\u12g4", "u12g4"),
             ("a\\", "a"),
@@ -1019,7 +1254,7 @@ class TestEncodingBoundaries:
             "trailing-backslash",
         ],
     )
-    def test_unescape_quoted_surrogate_edges(self, escaped: str, raw: str) -> None:
+    def test_unescape_quoted_never_decodes_unicode_escapes(self, escaped: str, raw: str) -> None:
         from mpp._parsing import _unescape_quoted
 
         assert _unescape_quoted(escaped) == raw
@@ -1034,24 +1269,24 @@ class TestEncodingBoundaries:
     def test_unescape_quoted_pairs_only_an_adjacent_escape(self) -> None:
         from mpp._parsing import _unescape_quoted
 
-        assert _unescape_quoted("\\ud800xudc00") == "\ufffdxudc00"
+        assert _unescape_quoted("\\ud800xudc00") == "ud800xudc00"
 
     def test_unquoted_auth_param_keeps_backslashes(self) -> None:
         from mpp._parsing import _parse_auth_params
 
-        assert _parse_auth_params('a=x\\u0041, b="x\\u0041"') == {"a": "x\\u0041", "b": "xA"}
+        assert _parse_auth_params('a=x\\u0041, b="x\\u0041"') == {"a": "x\\u0041", "b": "xu0041"}
 
     def test_receipt_timestamp_is_formatted_with_z(self) -> None:
         receipt = Receipt.success("0xabc", timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
         decoded = json.loads(base64.urlsafe_b64decode(receipt.to_payment_receipt() + "=="))
         assert decoded["timestamp"] == "2026-01-02T03:04:05Z"
 
-    def test_credential_echo_fields_default_to_empty(self) -> None:
+    def test_credential_echo_fields_are_required(self) -> None:
         header = "Payment " + _b64_json(
             {"challenge": {"id": "c", "method": "tempo"}, "payload": {}}
         )
-        echo = Credential.from_authorization(header).challenge
-        assert (echo.realm, echo.intent, echo.request) == ("", "", "")
+        with pytest.raises(ParseError, match="missing required field: realm"):
+            Credential.from_authorization(header)
 
     def test_receipt_extra_must_be_an_object(self) -> None:
         receipt = {
@@ -1118,19 +1353,16 @@ class TestOpaqueEcho:
         assert challenge.verify("secret-0123456789abcdef0123456789abcdef", "api.example.com")
 
     @pytest.mark.parametrize("suffix", [" ,!@", "!!!!"])
-    def test_non_base64url_opaque_is_not_retained(self, suffix: str) -> None:
+    def test_non_base64url_opaque_is_rejected(self, suffix: str) -> None:
         from mpp import Challenge
-        from mpp._canonical import canonical_b64url
 
         raw = "eyJyb3V0ZSI6Ii92MS9zZWFyY2giLCJwbGFuIjoicHJvIn0"
         header = (
             'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
             f'request="e30", opaque="{raw}{suffix}"'
         )
-        challenge = Challenge.from_www_authenticate(header)
-        canonical = canonical_b64url({"plan": "pro", "route": "/v1/search"})
-        assert challenge.to_echo().opaque == canonical
-        assert f'opaque="{canonical}"' in challenge.to_www_authenticate("api.example.com")
+        with pytest.raises(ParseError, match="Invalid base64"):
+            Challenge.from_www_authenticate(header)
 
     def test_undecodable_stored_opaque_falls_back_to_canonical(self) -> None:
         from mpp import Challenge
@@ -1251,3 +1483,200 @@ class TestOpaqueEcho:
         parsed = Challenge.from_www_authenticate(challenge.to_www_authenticate("api.example.com"))
         assert parsed.verify("secret-0123456789abcdef0123456789abcdef", "api.example.com")
         assert parsed.to_echo().opaque == challenge.to_echo().opaque
+
+
+def test_receipt_with_valid_method_rebuilds_only_a_plain_receipt() -> None:
+    from mpp._parsing import receipt_with_valid_method
+
+    plain = Receipt.success("ref", method="vendor-v2")
+    fixed = receipt_with_valid_method(plain, "vendor")
+    assert type(fixed) is Receipt
+    assert fixed.method == "vendor"
+    assert fixed.reference == "ref"
+    assert receipt_with_valid_method(fixed, "other") is fixed
+
+
+class _UncopyableReceipt(Receipt):
+    __slots__ = ()
+
+    def __copy__(self) -> Receipt:
+        raise RuntimeError("not copyable")
+
+    def __deepcopy__(self, memo: object) -> Receipt:
+        raise RuntimeError("not copyable")
+
+
+class _StatefulReceipt(Receipt):
+    __slots__ = ("note",)
+
+    def __init__(self, reference: str, note: str) -> None:
+        Receipt.__init__(
+            self,
+            status="success",
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            reference=reference,
+            method="vendor-v2",
+            payer="0xabc",
+        )
+        object.__setattr__(self, "note", note)
+
+
+def test_receipt_with_valid_method_replaces_invalid_subclasses_with_a_plain_receipt() -> None:
+    from mpp._parsing import receipt_with_valid_method
+
+    uncopyable = _UncopyableReceipt(
+        status="success",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        reference="ref",
+        method="vendor-v2",
+    )
+    stateful = _StatefulReceipt("ref", "kept")
+
+    for original in (uncopyable, stateful):
+        fixed = receipt_with_valid_method(original, "vendor")
+        assert type(fixed) is Receipt
+        assert fixed.method == "vendor"
+        assert fixed.reference == "ref"
+        # Every receipt it returns serializes, without the caller's help.
+        assert Receipt.from_payment_receipt(fixed.to_payment_receipt()).method == "vendor"
+    assert stateful.method == "vendor-v2"
+    assert stateful.note == "kept"
+
+
+def test_receipt_with_valid_method_keeps_a_valid_subclass() -> None:
+    from mpp._parsing import receipt_with_valid_method
+
+    valid = _UncopyableReceipt(
+        status="success",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        reference="ref",
+        method="vendor",
+    )
+    assert receipt_with_valid_method(valid, "other") is valid
+
+
+def test_payment_receipt_header_writes_the_fallback_method_without_copying() -> None:
+    from mpp._parsing import payment_receipt_header
+
+    for receipt in (
+        _UncopyableReceipt(
+            status="success",
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            reference="ref",
+            method="vendor-v2",
+            payer="0xabc",
+        ),
+        _StatefulReceipt("ref", "kept"),
+    ):
+        parsed = Receipt.from_payment_receipt(payment_receipt_header(receipt, "vendor"))
+        assert parsed.method == "vendor"
+        assert parsed.reference == "ref"
+
+    with pytest.raises(ParseError, match="Invalid payment method id"):
+        payment_receipt_header(_StatefulReceipt("ref", "kept"), "vendor-v2")
+
+
+def test_payment_receipt_header_keeps_a_valid_subclass_serializer() -> None:
+    from mpp._parsing import payment_receipt_header
+
+    class CustomReceipt(Receipt):
+        __slots__ = ()
+
+        def to_payment_receipt(self) -> str:
+            return "custom"
+
+    receipt = CustomReceipt(
+        status="success",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        reference="ref",
+        method="vendor",
+    )
+    assert payment_receipt_header(receipt, "other") == "custom"
+
+
+@pytest.mark.parametrize("bad", [None, 7, b"tempo"])
+def test_receipt_with_valid_method_replaces_non_string_method(bad: object) -> None:
+    from mpp._parsing import is_valid_payment_method_id, receipt_with_valid_method
+
+    assert not is_valid_payment_method_id(bad)
+    receipt = Receipt(
+        status="success",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        reference="ref",
+        method=bad,  # type: ignore[arg-type]
+    )
+    assert receipt_with_valid_method(receipt, "tempo").method == "tempo"
+
+
+class TestFormattedDescription:
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "plain",
+            "caf\u00e9 \u2014 \u2615",
+            "emoji \U0001f600",
+            "back\\slash \\u2014 literal",
+            'quote "x"',
+        ],
+    )
+    def test_round_trips_formatted_description(self, description: str) -> None:
+        challenge = Challenge(
+            id="x",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            description=description,
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert parse_formatted_description(header) == description
+
+    @pytest.mark.parametrize(
+        ("description", "expected"),
+        [
+            ("lone \ud800 high", "lone \ufffd high"),
+            ("lone \udc00 low", "lone \ufffd low"),
+            ("high \ud800A then text", "high \ufffdA then text"),
+            ("trailing \ud800", "trailing \ufffd"),
+            ("two highs \ud800\ud83d\ude00", "two highs \ufffd\U0001f600"),
+        ],
+    )
+    def test_lone_surrogates_decode_to_replacement(self, description: str, expected: str) -> None:
+        challenge = Challenge(
+            id="x", method="tempo", intent="charge", request={}, description=description
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        decoded = parse_formatted_description(header)
+        assert decoded == expected
+        assert decoded is not None
+        decoded.encode("utf-8")
+
+    def test_peer_parse_keeps_quoted_pair_semantics(self) -> None:
+        challenge = Challenge(
+            id="x", method="tempo", intent="charge", request={}, description="a\u2014b"
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert Challenge.from_www_authenticate(header).description == "au2014b"
+        assert parse_formatted_description(header) == "a\u2014b"
+
+    def test_missing_description(self) -> None:
+        header = 'Payment id="x", realm="r", method="tempo", intent="charge", request="e30"'
+        assert parse_formatted_description(header) is None
+
+    def test_rejects_other_scheme(self) -> None:
+        with pytest.raises(ParseError):
+            parse_formatted_description('Bearer realm="r"')
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("\\u12", "u12"),
+            ("\\uzzzz", "uzzzz"),
+            ("trailing\\", "trailing"),
+            ('\\"', '"'),
+        ],
+    )
+    def test_unescape_text_edge_cases(self, raw: str, expected: str) -> None:
+        assert _unescape_quoted_text(raw) == expected

@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
+from mpp._parsing import receipt_with_valid_method, validate_payment_method_id
 from mpp._validation import Validation
 from mpp.errors import VerificationFailedError
 from mpp.methods import CanOfferFn, Method, PaymentSuccessHandler
@@ -158,6 +159,13 @@ class ServerMethod:
     # multi-instance platform when it returns False, rather than let the method fall back
     # to an in-memory store.
     _has_store: Callable[[], bool] | None = None
+    # Internal: seconds after its challenge expires that the method still accepts a
+    # credential (see ``mpp._credential_expiry``), so the generic expiry checks leave it
+    # room to; the method enforces its own proof. ``None`` gives none.
+    _credential_grace: Callable[[Credential], float] | None = None
+    # Internal: whether the challenges this method issues carry the expiry grace marker,
+    # without which ``_credential_grace`` gives none.
+    _issue_expiry_grace: bool = False
     credential_options: tuple[str, ...] = ()
     needs_request_body: bool = False
     respond: RespondFn | None = None
@@ -193,13 +201,28 @@ class ServerMethod:
         """The `name/intent` key."""
         return self.method.key
 
-    async def settle(self, context: VerifyContext) -> tuple[Receipt, Validation | None]:
+    async def settle(
+        self,
+        context: VerifyContext,
+        *,
+        before_broadcast: Callable[[Validation], None] | None = None,
+    ) -> tuple[Receipt, Validation | None]:
         """Run `validate` then `broadcast`, or `verify`.
 
-        The validation's `payer` is copied to the receipt unless it already has one.
+        The validation's `payer` is copied to the receipt unless it already has one, and an
+        invalid receipt `method` is replaced by the challenge's, so a settled payment can
+        always send its receipt.
+        `before_broadcast` sees the validation before anything settles, and can raise to stop it.
+
+        Raises:
+            ParseError: If the challenge's method id is not lowercase letters, before any
+                hook runs, since its receipt could not be sent once the payment settled.
         """
+        validate_payment_method_id(context.challenge.method)
         if self.verify is not None:
-            return await self.verify(context), None
+            return receipt_with_valid_method(
+                await self.verify(context), context.challenge.method
+            ), None
         assert self.broadcast is not None
         validation = None
         if self.validate is not None:
@@ -214,7 +237,9 @@ class ServerMethod:
             )
             if not isinstance(validation, Validation):
                 raise VerificationFailedError("Intent returned an invalid validation result")
+            if before_broadcast is not None:
+                before_broadcast(validation)
         receipt = await self.broadcast(context)
         if validation is not None and validation.payer is not None and receipt.payer is None:
             receipt = replace(receipt, payer=validation.payer)
-        return receipt, validation
+        return receipt_with_valid_method(receipt, context.challenge.method), validation

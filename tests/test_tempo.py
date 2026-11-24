@@ -1327,6 +1327,32 @@ class TestInFlightSigning:
         assert method._signing == {}
 
     @pytest.mark.asyncio
+    async def test_concurrent_calls_from_two_origins_share_one_signing(self) -> None:
+        method, build = self._method()
+
+        with patch.object(method, "_build_tempo_transfer", build):
+            first, second = await asyncio.gather(
+                method.create_credential(self._challenge(), origin="https://a.example"),
+                method.create_credential(self._challenge(), origin="https://b.example"),
+            )
+
+        # One Challenge is paid once, whichever origin asks for it.
+        assert build.await_count == 1
+        assert first == second
+
+    @pytest.mark.asyncio
+    async def test_an_expired_challenge_is_not_paid(self) -> None:
+        method, build = self._method()
+        expired = self._challenge()
+        expired = replace(expired, expires="2000-01-01T00:00:00Z")
+
+        with patch.object(method, "_build_tempo_transfer", build):
+            with pytest.raises(PaymentExpiredError):
+                await method.create_credential(expired)
+
+        assert build.await_count == 0
+
+    @pytest.mark.asyncio
     async def test_failed_signing_is_not_shared_with_a_later_call(self) -> None:
         method, build = self._method()
         build.side_effect = [TransactionError("rpc down"), ("0x76ok", CHAIN_ID)]

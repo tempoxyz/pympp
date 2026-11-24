@@ -477,3 +477,43 @@ async def test_invalid_validation_result_is_rejected() -> None:
 
     with pytest.raises(VerificationFailedError, match="invalid validation result"):
         await _server(InvalidVerifiable()).validate_credential(_bound())
+
+
+class _OnlyReferenceReceipt(Receipt):
+    """A Receipt subclass whose constructor takes only a reference."""
+
+    __slots__ = ()
+
+    def __init__(self, reference: str) -> None:
+        Receipt.__init__(
+            self,
+            status="success",
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            reference=reference,
+            method="vendor-v2",
+        )
+
+
+async def test_verify_or_challenge_receipt_with_invalid_method_still_serializes():
+    # A direct caller serializes the receipt itself, after the payment settled.
+    class LegacyCharge(VerifiableCharge):
+        async def broadcast(self, credential: Credential, request: dict) -> Receipt:
+            self.calls.append("broadcast")
+            return _OnlyReferenceReceipt("legacy-reference")
+
+    request = {"amount": "1000"}
+    credential = _bound(request)
+
+    result = await verify_or_challenge(
+        authorization=credential.to_authorization(),
+        intent=LegacyCharge(),
+        request=_wire(request),
+        realm="api.example.com",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
+    )
+
+    assert isinstance(result, tuple)
+    receipt = result[1]
+    parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+    assert parsed.method == credential.challenge.method
+    assert parsed.reference == "legacy-reference"

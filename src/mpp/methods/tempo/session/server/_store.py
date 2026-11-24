@@ -31,7 +31,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
-from mpp.errors import PaymentError, VerificationFailedError
+from mpp.errors import InsufficientBalanceError, PaymentError, VerificationFailedError
 from mpp.methods.tempo.session._protocol import ChannelDescriptor, SignedVoucher, uint96
 from mpp.store import CompareAndSetStore, Store
 
@@ -42,17 +42,6 @@ _R = TypeVar("_R")
 # --------------------------------------------------------------------------------------------
 
 _SESSION_PROBLEMS = "https://paymentauth.org/problems/session"
-
-
-class InsufficientBalanceError(PaymentError):
-    """The channel's available voucher balance cannot cover the requested amount."""
-
-    status = 402
-    type = f"{_SESSION_PROBLEMS}/insufficient-balance"
-    title = "Insufficient Balance"
-
-    def __init__(self, reason: str | None = None) -> None:
-        super().__init__(f"Insufficient balance: {reason}." if reason else "Insufficient balance.")
 
 
 class InvalidSignatureError(PaymentError):
@@ -239,6 +228,13 @@ class ChannelState:
     idempotency_markers: Mapping[str, IdempotencyMarker] | None = None
     """Keyed charge and credit outcomes, by ``charge:<key>`` and ``credit:<key>``."""
     close_supervised_from_block: int | None = None
+    opening_commitment: str | None = None
+    """TIP-1166 config commitment the escrow cached for the voucher signer at open, or the
+    zero hash when it cached none.
+
+    None (as in records stored before this field existed) means unknown: verification
+    looks the opening commitment up on chain once and stores it.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,8 +409,13 @@ def open_channel_state(
     cumulative_amount: int,
     signature: str,
     state: OnChainChannelState,
+    opening_commitment: str | None = None,
 ) -> ChannelState:
-    """The persisted state for a verified precompile channel open."""
+    """The persisted state for a verified precompile channel open.
+
+    `opening_commitment` is the open receipt's TIP-1166 `OpeningCommitmentRecorded` commitment, or
+    the zero hash when the receipt has none.
+    """
     highest = resolve_highest_voucher(
         channel_id=channel_id,
         current=current,
@@ -452,6 +453,11 @@ def open_channel_state(
         "units": current.units if current else 0,
         "finalized": current.finalized if current else False,
         "created_at": current.created_at if current else _now_iso(),
+        "opening_commitment": (
+            opening_commitment
+            if opening_commitment is not None
+            else (current.opening_commitment if current else None)
+        ),
     }
     if current is not None and highest.highest_voucher_amount > current.highest_voucher_amount:
         fields["retained_vouchers"] = retain_vouchers(
@@ -780,6 +786,8 @@ def channel_state_to_json(state: ChannelState) -> dict[str, Any]:
         data["idempotencyMarkers"] = markers
     if state.close_supervised_from_block is not None:
         data["closeSupervisedFromBlock"] = str(state.close_supervised_from_block)
+    if state.opening_commitment is not None:
+        data["openingCommitment"] = state.opening_commitment
     return data
 
 
@@ -912,6 +920,10 @@ def channel_state_from_json(value: Mapping[str, Any]) -> ChannelState:
             else {str(k): _marker_from_json(m) for k, m in _obj(markers).items()}
         ),
         close_supervised_from_block=_opt_int(data, "closeSupervisedFromBlock"),
+        # "signerSnapshot" is the field's earlier name; records written with it still load.
+        opening_commitment=_opt_str(data, "openingCommitment")
+        or _opt_str(data, "signerSnapshot")
+        or _opt_str(data, "signer_snapshot"),
     )
 
 

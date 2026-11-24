@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -34,6 +35,7 @@ from mpp._parsing import ParseError, _b64_decode
 from mpp._typing import is_mapping
 from mpp.errors import MalformedCredentialError, VerificationFailedError
 from mpp.x402._header import (
+    MAX_HEADER_SIZE,
     InvalidHeaderError,
     decode_payment_signature,
     encode_payment_required,
@@ -48,6 +50,7 @@ from mpp.x402._types import (
     _json_equal,
     requirements_match,
 )
+from mpp.x402.siwx import EXTENSION_KEY as SIWX_EXTENSION
 
 if TYPE_CHECKING:
     from mpp import Receipt
@@ -55,6 +58,8 @@ if TYPE_CHECKING:
 
 RouteBinding = Literal["required", "resource"]
 """How a route-scoped charge binds an x402 payment to its route (mppx ``routeBinding``)."""
+
+logger = logging.getLogger(__name__)
 
 ROUTE_BINDING_EXTENSION = "mppx"
 """x402 extension key carrying mppx's route binding."""
@@ -319,7 +324,16 @@ def payment_required_header(
     }
     if extensions is not None:
         value["extensions"] = dict(extensions)
-    return encode_payment_required(value)  # type: ignore[arg-type]
+    encoded = encode_payment_required(value)  # type: ignore[arg-type]
+    if len(encoded) > MAX_HEADER_SIZE:
+        # x402 decoders, this SDK's included, reject a longer header: offer only MPP.
+        logger.warning(
+            "x402 PAYMENT-REQUIRED is %d bytes, over the %d-byte limit; omitting x402 offers",
+            len(encoded),
+            MAX_HEADER_SIZE,
+        )
+        return None
+    return encoded
 
 
 def challenges_payment_required_header(
@@ -328,14 +342,20 @@ def challenges_payment_required_header(
     resource_url: str,
     http_method: str,
     error: str | None = None,
+    siwx_for: Callable[[Any], Mapping[str, Any] | None] | None = None,
 ) -> str | None:
     """Build ``PAYMENT-REQUIRED`` for issued challenges, with their route binding.
 
     Offers whose route bindings differ can't share one header; like mppx, the
     first one is kept and the error says why the rest were dropped.
+
+    ``siwx_for`` returns an offer's ``sign-in-with-x`` extension, if it accepts SIWX.
+    Like mppx, offers' SIWX extensions merge into the first one with every offer's
+    chains, since a nonce isn't tied to the offer that issued it.
     """
     accepts: list[PaymentRequirements] = []
     extensions: dict[str, Any] | None = None
+    siwx: dict[str, Any] | None = None
     mismatch = False
     for challenge in challenges:
         accepted = accepts_for(challenge)
@@ -348,12 +368,25 @@ def challenges_payment_required_header(
             mismatch = True
             continue
         accepts.append(accepted)
+        offered = siwx_for(challenge) if siwx_for is not None else None
+        if offered is None:
+            continue
+        if siwx is None:
+            siwx = {**offered, "supportedChains": []}
+        for chain in offered["supportedChains"]:
+            if not any(
+                known["chainId"] == chain["chainId"] and known["type"] == chain["type"]
+                for known in siwx["supportedChains"]
+            ):
+                siwx["supportedChains"].append(chain)
     if mismatch:
         error = "; ".join(
             part
             for part in (error, "Cannot merge x402 payment requirements with different routes.")
             if part
         )
+    if siwx is not None and extensions is not None:
+        extensions = {**extensions, SIWX_EXTENSION: siwx}
     return payment_required_header(accepts, resource_url, error, extensions)
 
 

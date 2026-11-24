@@ -33,14 +33,15 @@ from mpp.methods.tempo.session._protocol import (
 )
 from mpp.methods.tempo.session.client._ops import (
     SessionCredentialPayload,
+    assert_configurable_vouchers_supported,
     create_close_payload,
     create_open_payload,
     create_top_up_payload,
     create_voucher_payload,
     is_same_address,
     read_optional_address,
-    resolve_authorized_signer,
     resolve_escrow,
+    voucher_authorities,
 )
 from mpp.methods.tempo.session.client._store import (
     ChannelEntry,
@@ -111,6 +112,8 @@ class ChallengeContext:
     operator: str | None = None
     snapshot: SessionSnapshot | None = None
     suggested_deposit_raw: str | None = None
+    configurable_vouchers: bool = False
+    """The server accepts TIP-1166 configurable account vouchers."""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -139,6 +142,8 @@ class CredentialPlan:
     context: SessionContext | None = None
     decimals: int = 6
     max_deposit: int | None = None
+    voucher_signer: Any = None
+    """Signs vouchers in place of ``account`` (such as a TIP-1166 ``ConfigurableAccount``)."""
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -323,6 +328,7 @@ async def resolve_challenge_context(
         operator=read_optional_address(details.get("operator")),
         snapshot=read_session_snapshot(details),
         suggested_deposit_raw=suggested if isinstance(suggested, str) else None,
+        configurable_vouchers=details.get("configurableVouchers") is True,
     )
 
 
@@ -338,7 +344,7 @@ def _assert_reusable_descriptor(
     expected_channel_id: str,
     payee: str,
     payer: str,
-    authorized_signer: str,
+    authorized_signers: Sequence[str],
     token: str,
 ) -> None:
     if channel_id and channel_id.lower() != expected_channel_id.lower():
@@ -349,7 +355,8 @@ def _assert_reusable_descriptor(
         raise ValueError("context descriptor token does not match challenge")
     if not is_same_address(descriptor.payer, payer):
         raise ValueError("context descriptor payer does not match account")
-    if not is_same_address(resolve_descriptor_signer(descriptor), authorized_signer):
+    signer = resolve_descriptor_signer(descriptor)
+    if not any(is_same_address(signer, authority) for authority in authorized_signers):
         raise ValueError("context descriptor authorizedSigner does not match account")
 
 
@@ -360,6 +367,7 @@ async def resolve_reusable_channel(
     resolved: ChallengeContext,
     channel_id: str | None = None,
     client: httpx.AsyncClient | None = None,
+    voucher_signer: Any = None,
 ) -> tuple[str, chain.ChannelState]:
     """Validate a descriptor against the challenge and read its open on-chain state."""
     expected_channel_id = compute_channel_id(
@@ -371,7 +379,7 @@ async def resolve_reusable_channel(
         expected_channel_id=expected_channel_id,
         payee=resolved.payee,
         payer=account.address,
-        authorized_signer=resolve_authorized_signer(account),
+        authorized_signers=voucher_authorities(account, voucher_signer),
         token=resolved.token,
     )
     state = await chain.get_channel_state(
@@ -386,12 +394,17 @@ async def resolve_reusable_channel(
     return expected_channel_id, state
 
 
-def can_sign_descriptor(account: TempoAccount, descriptor: ChannelDescriptor) -> bool:
-    """Whether ``account`` is the descriptor's payer and voucher authority."""
+def can_sign_descriptor(
+    account: TempoAccount, descriptor: ChannelDescriptor, voucher_signer: Any = None
+) -> bool:
+    """Whether ``account`` is the descriptor's payer and it (or ``voucher_signer``) its
+    voucher authority."""
     if not is_same_address(account.address, descriptor.payer):
         return False
-    return is_same_address(
-        resolve_authorized_signer(account), resolve_descriptor_signer(descriptor)
+    signer = resolve_descriptor_signer(descriptor)
+    return any(
+        is_same_address(signer, authority)
+        for authority in voucher_authorities(account, voucher_signer)
     )
 
 
@@ -483,13 +496,19 @@ def plan_credential(
     context: SessionContext | None = None,
     decimals: int = 6,
     max_deposit: int | None = None,
+    voucher_signer: Any = None,
 ) -> CredentialPlan:
     """Choose the next credential from the cached channel and optional context."""
     if context is not None and context.action is not None:
         if context.descriptor is None:
             raise ValueError("descriptor required for TIP-1034 session action")
         return CredentialPlan(
-            type="manual", account=account, resolved=resolved, context=context, decimals=decimals
+            type="manual",
+            account=account,
+            resolved=resolved,
+            context=context,
+            decimals=decimals,
+            voucher_signer=voucher_signer,
         )
     if entry is None and context is not None and context.channel_id and not context.descriptor:
         raise ValueError("descriptor required to reuse TIP-1034 channel")
@@ -498,7 +517,7 @@ def plan_credential(
         entry is None
         and recover is not None
         and recover.descriptor is not None
-        and can_sign_descriptor(account, recover.descriptor)
+        and can_sign_descriptor(account, recover.descriptor, voucher_signer)
     ):
         return CredentialPlan(
             type="recover",
@@ -507,17 +526,28 @@ def plan_credential(
             context=recover,
             decimals=decimals,
             max_deposit=max_deposit,
+            voucher_signer=voucher_signer,
         )
-    if entry is not None and entry.opened and can_sign_descriptor(account, entry.descriptor):
+    if (
+        entry is not None
+        and entry.opened
+        and can_sign_descriptor(account, entry.descriptor, voucher_signer)
+    ):
         return CredentialPlan(
             type="voucher",
             account=account,
             resolved=resolved,
             entry=entry,
             max_deposit=max_deposit,
+            voucher_signer=voucher_signer,
         )
     return CredentialPlan(
-        type="open", account=account, resolved=resolved, context=context, max_deposit=max_deposit
+        type="open",
+        account=account,
+        resolved=resolved,
+        context=context,
+        max_deposit=max_deposit,
+        voucher_signer=voucher_signer,
     )
 
 
@@ -629,6 +659,7 @@ async def execute_credential_plan(
     """
     resolved = plan.resolved
     account = plan.account
+    voucher_signer = plan.voucher_signer
     if plan.type == "open":
         deposit = resolve_opening_deposit(
             request_amount=resolved.amount,
@@ -657,6 +688,8 @@ async def execute_credential_plan(
                 trusted_currencies=trusted_currencies,
             ),
             client=client,
+            voucher_signer=voucher_signer,
+            configurable_vouchers=resolved.configurable_vouchers,
         )
         await _store_channel_entry(
             sink,
@@ -681,6 +714,7 @@ async def execute_credential_plan(
             resolved=resolved,
             channel_id=plan.context.channel_id,
             client=client,
+            voucher_signer=voucher_signer,
         )
         cumulative = resolve_recovered_cumulative(
             context=plan.context,
@@ -693,7 +727,12 @@ async def execute_credential_plan(
             raise ValueError("recovered voucher amount exceeds on-chain channel deposit")
         assert_within_max_deposit(cumulative, plan.max_deposit)
         payload = create_voucher_payload(
-            account, descriptor, cumulative, resolved.chain_id, resolved.escrow
+            account,
+            descriptor,
+            cumulative,
+            resolved.chain_id,
+            resolved.escrow,
+            voucher_signer=voucher_signer,
         )
         current = await store_get(sink.store, resolved.key)
         await _store_channel_entry(
@@ -721,7 +760,12 @@ async def execute_credential_plan(
         cumulative = entry.cumulative_amount + resolved.amount
         assert_within_max_deposit(cumulative, plan.max_deposit)
         payload = create_voucher_payload(
-            account, entry.descriptor, cumulative, resolved.chain_id, resolved.escrow
+            account,
+            entry.descriptor,
+            cumulative,
+            resolved.chain_id,
+            resolved.escrow,
+            voucher_signer=voucher_signer,
         )
         await _store_channel_entry(sink, entry.copy(cumulative_amount=cumulative))
         return payload
@@ -743,6 +787,7 @@ async def _manual(
     context = plan.context
     assert context is not None and context.descriptor is not None
     resolved, account, decimals = plan.resolved, plan.account, plan.decimals
+    voucher_signer = plan.voucher_signer
     descriptor = context.descriptor
     channel_id = compute_channel_id(descriptor, chain_id=resolved.chain_id, escrow=resolved.escrow)
     _assert_reusable_descriptor(
@@ -751,15 +796,21 @@ async def _manual(
         expected_channel_id=channel_id,
         payee=resolved.payee,
         payer=account.address,
-        authorized_signer=resolve_authorized_signer(account),
+        authorized_signers=voucher_authorities(account, voucher_signer),
         token=resolved.token,
     )
     if context.action == "open":
         if not context.transaction:
             raise ValueError("transaction required for open action")
+        assert_configurable_vouchers_supported(voucher_signer, resolved.configurable_vouchers)
         cumulative = require_context_amount(context, decimals, "cumulative_amount", "open")
         voucher = create_voucher_payload(
-            account, descriptor, cumulative, resolved.chain_id, resolved.escrow
+            account,
+            descriptor,
+            cumulative,
+            resolved.chain_id,
+            resolved.escrow,
+            voucher_signer=voucher_signer,
         )
         return OpenPayload.model_validate(
             {
@@ -808,6 +859,7 @@ async def _manual(
             require_context_amount(context, decimals, "cumulative_amount", "voucher"),
             resolved.chain_id,
             resolved.escrow,
+            voucher_signer=voucher_signer,
         )
     return create_close_payload(
         account,
@@ -815,4 +867,5 @@ async def _manual(
         require_context_amount(context, decimals, "cumulative_amount", "close"),
         resolved.chain_id,
         resolved.escrow,
+        voucher_signer=voucher_signer,
     )

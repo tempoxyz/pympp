@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mpp import AUTHORIZATION_HEADER, Challenge
-from mpp._parsing import ParseError
+from mpp._parsing import (
+    ParseError,
+    assert_not_legacy_unicode_escaped,
+    is_legacy_unicode_escaped,
+)
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.methods.tempo.client import (
@@ -63,6 +67,7 @@ from mpp.methods.tempo.session.client._store import (
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
     from mpp.methods.tempo.client import AutoSwap
+    from mpp.methods.tempo.session._configurable import ConfigurableAccount
     from mpp.runtime import AttemptOutcome, ClientMethod, CredentialParams
 
 Send = Callable[[httpx.Request], Awaitable[httpx.Response]]
@@ -128,7 +133,8 @@ def session_challenges(response: httpx.Response) -> list[Challenge]:
                 challenge = Challenge.from_www_authenticate(field)
             except ParseError:
                 continue
-            if is_tip1034_session_challenge(challenge):
+            # A legacy \uXXXX-escaped challenge would be rejected after signing: skip it.
+            if is_tip1034_session_challenge(challenge) and not is_legacy_unicode_escaped(challenge):
                 found.append(challenge)
     return found
 
@@ -322,6 +328,7 @@ class SessionMethod:
         max_amount: str | Decimal | None = None,
         max_amount_decimals: int | None = None,
         origin: str | None = None,
+        voucher_signer: ConfigurableAccount | None = None,
     ) -> None:
         self.origin = None if origin is None else _configured_origin(origin)
         self._policy = _SpendingPolicy.resolve(
@@ -336,6 +343,7 @@ class SessionMethod:
                 raise ValueError("allowed_chain_ids must be a sequence of chain IDs")
             allowed_chain_ids = tuple(allowed_chain_ids)
         self.account = account
+        self.voucher_signer = voucher_signer
         self.decimals = decimals
         self.max_deposit = parse_units(max_deposit, decimals) if max_deposit is not None else None
         self.top_up_amount = (
@@ -445,6 +453,9 @@ class SessionMethod:
 
     async def _create(self, params: CredentialParams, origin: str | None) -> str:
         challenge = params.challenge
+        # Every public entry (create_credential, create_session_credential, top-ups) lands
+        # here: refuse a legacy escaped Challenge before any policy, signing or state change.
+        assert_not_legacy_unicode_escaped(challenge)
         context = params.context
         if context is not None and not isinstance(context, SessionContext):
             raise TypeError("tempo session context must be a SessionContext")
@@ -574,6 +585,7 @@ class SessionMethod:
             context=context,
             decimals=self.decimals,
             max_deposit=self.max_deposit,
+            voucher_signer=self.voucher_signer,
         )
 
     async def _top_up_before_voucher(
@@ -594,7 +606,7 @@ class SessionMethod:
         deposit = max(snapshot.deposit, channel.deposit) if snapshot else channel.deposit
         if required <= deposit and deposit == channel.deposit:
             return
-        if not can_sign_descriptor(self.account, channel.descriptor):
+        if not can_sign_descriptor(self.account, channel.descriptor, self.voucher_signer):
             return
         if required > deposit:
             assert_voucher_within_local_limit(required, self.max_deposit)
@@ -853,6 +865,7 @@ def session(
     max_amount: str | Decimal | None = None,
     max_amount_decimals: int | None = None,
     origin: str | None = None,
+    voucher_signer: ConfigurableAccount | None = None,
 ) -> ClientMethod:
     """Create the client method that pays Tempo session (TIP-1034) challenges.
 
@@ -905,6 +918,16 @@ def session(
             recovering an unknown channel from a server snapshot requires this pin or a
             caller-supplied descriptor. Stored channels are reused only for the exact origin
             they are bound to, so use a separate ``channel_store`` per origin.
+        voucher_signer: A TIP-1166
+            :class:`~mpp.methods.tempo.session.client.ConfigurableAccount` that signs the
+            channel's vouchers in place of ``account``. New channels name it as their
+            authorized signer and use its config commitment as their salt (T15 requires it).
+            Opening needs a server that advertises ``methodDetails.configurableVouchers``; against
+            any other server the client raises
+            :class:`~mpp.methods.tempo.session.client.ConfigurableVouchersUnsupportedError` before
+            signing. A top-up after the account's configuration changed raises
+            :class:`~mpp.methods.tempo.session.client.SignerConfigChangedError`: close the
+            channel and open a new one.
 
     The spending options never block an explicit close (``SessionContext(action="close")``,
     :meth:`SessionManager.close`), which settles what the channel already spent.
@@ -937,4 +960,5 @@ def session(
         max_amount=max_amount,
         max_amount_decimals=max_amount_decimals,
         origin=origin,
+        voucher_signer=voucher_signer,
     ).client_method()

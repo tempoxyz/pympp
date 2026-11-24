@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, overload
 from eth_utils.address import to_checksum_address
 
 from mpp import Challenge, Credential
+from mpp._parsing import assert_not_legacy_unicode_escaped
 from mpp._typing import is_list, is_mapping
 from mpp._units import parse_units
 from mpp.methods import CanOfferFn, PaymentSuccessHandler
@@ -31,8 +32,11 @@ from mpp.x402._server import RouteBinding
 from mpp.x402.facilitator import Facilitator
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mpp.server.method import RequestContext, ServerMethod
     from mpp.store import Store
+    from mpp.x402.siwx import SiwxOptions
 
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 DEFAULT_VALIDITY_SECONDS = 300
@@ -174,6 +178,7 @@ class _Config:
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Sign a native ``evm/charge`` credential for a challenge."""
+        assert_not_legacy_unicode_escaped(challenge)
         if self.account is None:
             raise ValueError("No account configured for EVM credentials")
         request = self._check_challenge(challenge)
@@ -355,6 +360,8 @@ def evm(
     route_binding: RouteBinding = "required",
     max_validity_seconds: int = 3600,
     store: Store | None = None,
+    siwx: SiwxOptions | None = None,
+    x402_extra: Mapping[str, Any] | None = None,
     can_offer: CanOfferFn | None = None,
     on_payment_success: PaymentSuccessHandler | None = None,
 ) -> ServerMethod: ...
