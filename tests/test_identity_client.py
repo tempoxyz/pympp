@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,9 +11,9 @@ from typing import Any
 import httpx
 import pytest
 
-from mpp import Challenge, Credential
+from mpp import Challenge, Credential, PaymentOutcomeUnknownError
 from mpp.client import Mpp
-from mpp.client._identity import IdentityClient, is_paid
+from mpp.client._identity import IdentityClient, _detach, is_paid
 from mpp.identity import (
     PaymentCheck,
     PaymentCheckInput,
@@ -500,6 +501,138 @@ async def test_headers_a_paid_attempt_was_resent_with_reach_the_next_paid_attemp
         response = await mpp.fetch(f"{API}/paid")
     assert response.status_code == 200
     assert [r.headers.get("X-Token") for r in transport.requests] == [None, None, "fresh", "fresh"]
+
+
+async def test_a_paid_resend_that_fails_in_transport_propagates() -> None:
+    client = IdentityClient([header_prover("X-Proof", retry=resend_with({"X-Token": "fresh"}))])
+    target = live()
+    calls = 0
+
+    async def send(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(401, content=b"denied", request=request)
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    with pytest.raises(httpx.ReadTimeout):
+        await client.send(
+            send,
+            httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+            challenge=target,
+        )
+    assert calls == 2
+
+
+async def test_a_paid_resend_failing_in_transport_leaves_the_outcome_unknown() -> None:
+    def respond(call: int) -> httpx.Response:
+        if call == 1:
+            return httpx.Response(
+                402, headers={"WWW-Authenticate": live("c1").to_www_authenticate("api.example")}
+            )
+        if call == 2:
+            return httpx.Response(401, content=b"denied")
+        raise httpx.ReadTimeout("timed out")
+
+    transport = ScriptedTransport(respond)
+    prover = header_prover("X-Proof", retry=resend_with({"X-Token": "fresh"}))
+    mpp = Mpp(methods=[paying_method()], identity=[prover])
+    mpp.payment_transport._inner = transport
+    async with mpp:
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await mpp.fetch(f"{API}/paid")
+    assert len(transport.requests) == 3
+
+
+async def test_a_gzip_paid_401_read_by_a_retry_hook_is_returned_readable() -> None:
+    proves = 0
+
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        nonlocal proves
+        proves += 1
+        if proves > 1:
+            raise RuntimeError("prove failed")
+        return request
+
+    bodies: list[bytes] = []
+
+    async def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        bodies.append(await response.aread())
+        return {}
+
+    client = IdentityClient([Prover(scope=(API,), prove=prove, retry=retry)])
+    target = live()
+    body = gzip.compress(b"denied")
+    send = Script(
+        httpx.Response(
+            401,
+            headers={"Content-Encoding": "gzip", "Content-Length": str(len(body))},
+            stream=httpx.ByteStream(body),
+        )
+    )
+    response, _ = await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+        challenge=target,
+    )
+    assert bodies == [b"denied"]
+    assert response.status_code == 401
+    assert await response.aread() == b"denied"
+    assert response.text == "denied"
+
+
+async def test_a_decoded_paid_401_is_copied_without_its_encoding() -> None:
+    body = gzip.compress(b"denied")
+    rejected = httpx.Response(
+        401,
+        headers={"Content-Encoding": "gzip", "Content-Length": str(len(body))},
+        stream=httpx.ByteStream(body),
+    )
+    await rejected.aread()
+    copy = await _detach(rejected)
+    assert "content-encoding" not in copy.headers
+    assert "content-length" not in copy.headers
+    assert await copy.aread() == b"denied"
+
+
+class TrackedStream(httpx.AsyncByteStream):
+    """A response body that records when its connection is released."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self.body
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_a_paid_401_is_released_before_retry_hooks_run() -> None:
+    stream = TrackedStream(b"denied")
+    released: list[bool] = []
+
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        return request
+
+    async def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str] | None:
+        # A hook refreshing identity through the same pool needs the connection free.
+        released.append(stream.closed)
+        assert await response.aread() == b"denied"
+        return None
+
+    client = IdentityClient([Prover(scope=(API,), prove=prove, retry=retry)])
+    target = live()
+    send = Script(httpx.Response(401, stream=stream))
+    response, _ = await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+        challenge=target,
+    )
+    assert released == [True]
+    assert len(send.sent) == 1
+    assert await response.aread() == b"denied"
 
 
 # --- Preparing ----------------------------------------------------------------------------------

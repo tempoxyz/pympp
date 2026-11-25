@@ -509,7 +509,9 @@ class Prover:
       closed, so its headers are readable but its body is not, and the transport is free for
       requests ``prepare`` makes itself.
     - ``retry``: given a rejected (non-402) response to an unpaid request, returns headers to
-      resend it once with, or None. Payment credential headers it returns are ignored.
+      resend it once with, or None. It also runs for a paid attempt's 401 that carries no
+      receipt, which is resent once with the same Payment credential while its Challenge has
+      not expired. Payment credential headers it returns are ignored.
     """
 
     scope: ProverScope

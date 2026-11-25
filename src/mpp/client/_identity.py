@@ -113,11 +113,14 @@ class IdentityClient:
         expires = _resendable_expiry(request, challenge) if paid and retriers else None
         if paid and (expires is None or not _unexpired(expires)):
             retriers = ()
-        result = await self._send_once(send, request, challenge, carried)
-        assert result is not None
-        sent, response = result
+        sent, response = await self._send_once(send, request, challenge, carried)
         if not retriers or not replayable or not _can_resend(paid, response, expires):
             return response, carried
+        if paid:
+            # A paid attempt's 401 is copied, within a size and time bound, and released before
+            # the retry hooks run, so a hook refreshing identity through the same connection
+            # pool never waits on it. The copy is returned if the attempt is not resent.
+            response = await _detach(response)
         try:
             resend = await _resend_headers(retriers, response, sent)
         except Exception:
@@ -133,10 +136,7 @@ class IdentityClient:
             raise
         if resend is None:
             return response, carried
-        # The rejected response is released before the provers run again; a paid attempt
-        # keeps a bounded copy to return if it is not resent.
-        fallback = await _detach(response) if paid else None
-        if fallback is None:
+        if not paid:
             await response.aclose()
         headers = _merge(carried, resend)
 
@@ -146,16 +146,17 @@ class IdentityClient:
             return expires is None or _unexpired(expires)
 
         try:
-            resent = await self._send_once(send, request, challenge, headers, proceed=proceed)
+            proved = await self._prove(request, challenge, headers, proceed=proceed)
         except Exception:
             # A prover failing before the paid resend was sent: the 401 stands.
-            if fallback is not None:
-                return fallback, carried
+            if paid:
+                return response, carried
             raise
-        if resent is None:
-            assert fallback is not None
-            return fallback, carried
-        return resent[1], headers
+        if proved is None:
+            return response, carried
+        # Sent outside the guard above: once the paid resend went out, a transport failure
+        # leaves the payment's outcome unknown and propagates to the caller.
+        return await send(proved), headers
 
     async def prepare(self, response: httpx.Response, challenge: Challenge, url: httpx.URL) -> None:
         """Let provers in scope of ``url`` prepare proofs for its 402 before the paid retry."""
@@ -173,18 +174,29 @@ class IdentityClient:
         request: httpx.Request,
         challenge: Challenge | None,
         carried: HeaderPairs,
+    ) -> tuple[httpx.Request, httpx.Response]:
+        """Prove and send one attempt, returning the request as sent and its response."""
+        proved = await self._prove(request, challenge, carried)
+        assert proved is not None
+        return proved, await send(proved)
+
+    async def _prove(
+        self,
+        request: httpx.Request,
+        challenge: Challenge | None,
+        carried: HeaderPairs,
         *,
         proceed: Callable[[], bool] | None = None,
-    ) -> tuple[httpx.Request, httpx.Response] | None:
-        """Prove and send one attempt.
+    ) -> httpx.Request | None:
+        """Apply every in-scope prover to a copy of the request.
 
-        ``proceed`` runs after the provers, right before sending; False sends nothing (None).
+        ``proceed`` runs after the provers; False means the attempt is not sent (None).
         """
         scoped = self.in_scope(request.url)
         if not scoped:
             if proceed is not None and not proceed():
                 return None
-            return request, await send(request)
+            return request
         # Retry headers never replace a payment credential: the fixed credential headers, the
         # one the Challenge names, or any header already holding a Payment credential.
         protected = set(CREDENTIAL_HEADERS)
@@ -222,7 +234,7 @@ class IdentityClient:
             proved.headers[name] = value
         if proceed is not None and not proceed():
             return None
-        return proved, await send(proved)
+        return proved
 
 
 async def _resend_headers(
@@ -316,9 +328,11 @@ async def _detach(response: httpx.Response) -> httpx.Response:
     chunks: list[bytes] = []
     received = 0
     truncated = True
+    decoded = False
     try:
         if response.is_stream_consumed:
-            # A retry hook already read the body.
+            # The body was already read and decoded: the copy holds the decoded bytes.
+            decoded = True
             chunks.append(response.content)
             received = len(response.content)
             truncated = received > _MAX_FALLBACK_BYTES
@@ -336,6 +350,10 @@ async def _detach(response: httpx.Response) -> httpx.Response:
     finally:
         await response.aclose()
     headers = httpx.Headers(response.headers)
+    if decoded:
+        # The decoded body no longer matches the encoding or length the server sent.
+        headers.pop("content-encoding", None)
+        headers.pop("content-length", None)
     if truncated:
         headers.pop("content-length", None)
         headers["Mppx-Body-Truncated"] = "true"
