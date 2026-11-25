@@ -38,6 +38,8 @@ MAX_AUTHORIZATION_SIZE = 64 * 1024
 _PAYMENT_METHOD_ID_RE = re.compile(r"[a-z]+")
 # Characters mppx accepts in an auth-param name.
 _AUTH_PARAM_KEY_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
+_TCHARS = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-.^_" + chr(96) + "|~")
+"""RFC 9110 ``tchar``: an unquoted auth-param value is a token, 1*tchar."""
 
 
 class ParseError(Exception):
@@ -353,14 +355,13 @@ def _parse_auth_params(
             if quoted_raw is not None:
                 quoted_raw[key] = params_str[start : index - 1]
         else:
-            # A token value ends at whitespace or the comma that separates auth-params.
+            # An unquoted value is a token (1*tchar, RFC 9110): it ends at the first
+            # character that is not a tchar, and an empty one is malformed (mppx).
             value_end = index
-            while (
-                value_end < length
-                and params_str[value_end] != ","
-                and not params_str[value_end].isspace()
-            ):
+            while value_end < length and params_str[value_end] in _TCHARS:
                 value_end += 1
+            if value_end == index:
+                raise ParseError("Malformed auth-param")
             value, index = params_str[index:value_end], value_end
 
         # Auth-params are separated by OWS "," OWS: anything else after a value,
