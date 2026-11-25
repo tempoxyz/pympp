@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import datetime
 
+import anyio
 import httpx
 
-from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge
+from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge, ChallengeEcho
+from mpp._parsing import parse_authorization
 from mpp.identity import (
     REQUEST_HEADERS,
     HeaderPairs,
@@ -30,6 +34,15 @@ CREDENTIAL_HEADERS = frozenset(
 
 _PAYMENT_SCHEME_RE = re.compile(r"(?:^|,)\s*payment\s+\S", re.IGNORECASE)
 
+_SETTLEMENT_HEADERS = ("payment-receipt", "payment-response", "x-payment-response")
+"""Response headers that report a settled payment (MPP receipt, x402 settlement response)."""
+
+_MAX_FALLBACK_BYTES = 64 * 1024
+"""Largest part of a rejected paid response's body kept to return when it is not resent."""
+
+_FALLBACK_TIMEOUT = 2.0
+"""Longest wait, in seconds, for a rejected paid response's body."""
+
 
 def holds_payment(value: str) -> bool:
     """Whether a header value carries a Payment credential."""
@@ -48,8 +61,10 @@ class IdentityClient:
 
     Provers run in order on every attempt, sharing one :class:`~mpp.identity.ProveContext`; list
     request signers last so their signatures cover headers added by earlier provers. A rejected
-    (non-402) response to an unpaid attempt may be resent once if a prover's ``retry`` asks; a
-    paid attempt is never resent, since its payment may have settled.
+    (non-402) response to an unpaid attempt may be resent once if a prover's ``retry`` asks. A
+    paid attempt is resent only after a 401 with no receipt, with the same Payment credential and
+    while its Challenge has not expired: servers check other authentication before verifying a
+    Payment credential, so a 401 means nothing settled.
     """
 
     def __init__(self, provers: Sequence[Prover]) -> None:
@@ -82,32 +97,65 @@ class IdentityClient:
         carried: HeaderPairs = (),
         replayable: bool = True,
     ) -> tuple[httpx.Response, HeaderPairs]:
-        """Prove and send one request, resending an unpaid rejection once if a prover asks.
+        """Prove and send one request, resending a rejection once if a prover asks.
+
+        An unpaid attempt may be resent after any non-402 rejection. A paid attempt is resent,
+        with the same Payment credential, only after a 401 that carries no receipt and while
+        the Challenge its credential answers has not expired; if a retry hook or re-proving
+        fails, or the Challenge expires first, that 401 is returned without resending.
 
         Returns the response and the retry headers the last attempt carried, to pass on to the
         paid attempt. The caller's request is never changed: provers work on a copy.
         """
         paid = challenge is not None or is_paid(request)
-        retriers = () if paid else tuple(p for p in self.in_scope(request.url) if p.retry)
-        sent, response = await self._send_once(send, request, challenge, carried)
-        if (
-            not retriers
-            or not replayable
-            or response.status_code < 400
-            or response.status_code == 402
-        ):
+        retriers = tuple(p for p in self.in_scope(request.url) if p.retry)
+        # A paid attempt may be resent only with the Payment credential for its Challenge.
+        expires = _resendable_expiry(request, challenge) if paid and retriers else None
+        if paid and (expires is None or not _unexpired(expires)):
+            retriers = ()
+        result = await self._send_once(send, request, challenge, carried)
+        assert result is not None
+        sent, response = result
+        if not retriers or not replayable or not _can_resend(paid, response, expires):
             return response, carried
         try:
             resend = await _resend_headers(retriers, response, sent)
+        except Exception:
+            # The server's 401 to a paid attempt was received and nothing was resent, so a
+            # failing retry hook returns that 401 rather than leaving the payment's outcome
+            # unknown.
+            if paid:
+                return response, carried
+            await response.aclose()
+            raise
         except BaseException:
             await response.aclose()
             raise
         if resend is None:
             return response, carried
-        await response.aclose()
+        # The rejected response is released before the provers run again; a paid attempt
+        # keeps a bounded copy to return if it is not resent.
+        fallback = await _detach(response) if paid else None
+        if fallback is None:
+            await response.aclose()
         headers = _merge(carried, resend)
-        _, response = await self._send_once(send, request, challenge, headers)
-        return response, headers
+
+        def proceed() -> bool:
+            # The Challenge may expire while provers refresh identity: a paid attempt is
+            # checked again right before the resend.
+            return expires is None or _unexpired(expires)
+
+        try:
+            resent = await self._send_once(send, request, challenge, headers, proceed=proceed)
+        except Exception:
+            # A prover failing before the paid resend was sent: the 401 stands.
+            if fallback is not None:
+                return fallback, carried
+            raise
+        if resent is None:
+            assert fallback is not None
+            return fallback, carried
+        return resent[1], headers
 
     async def prepare(self, response: httpx.Response, challenge: Challenge, url: httpx.URL) -> None:
         """Let provers in scope of ``url`` prepare proofs for its 402 before the paid retry."""
@@ -125,9 +173,17 @@ class IdentityClient:
         request: httpx.Request,
         challenge: Challenge | None,
         carried: HeaderPairs,
-    ) -> tuple[httpx.Request, httpx.Response]:
+        *,
+        proceed: Callable[[], bool] | None = None,
+    ) -> tuple[httpx.Request, httpx.Response] | None:
+        """Prove and send one attempt.
+
+        ``proceed`` runs after the provers, right before sending; False sends nothing (None).
+        """
         scoped = self.in_scope(request.url)
         if not scoped:
+            if proceed is not None and not proceed():
+                return None
             return request, await send(request)
         # Retry headers never replace a payment credential: the fixed credential headers, the
         # one the Challenge names, or any header already holding a Payment credential.
@@ -164,6 +220,8 @@ class IdentityClient:
                 raise TypeError("Prover.prove must return an httpx.Request")
         for name, value in credentials:
             proved.headers[name] = value
+        if proceed is not None and not proceed():
+            return None
         return proved, await send(proved)
 
 
@@ -191,6 +249,107 @@ async def _resend_headers(
     if not resend:
         return None
     return tuple((name, ", ".join(values)) for name, values in combined.values())
+
+
+def _can_resend(paid: bool, response: httpx.Response, expires: datetime | None) -> bool:
+    """Whether a rejected response may be resent.
+
+    An unpaid attempt after any non-402 rejection. A paid attempt only after a 401, which never
+    follows settlement, that carries no receipt or other settlement header, while its Challenge
+    has not expired. A 403 can follow a settled payment, so a paid one is never resent.
+    """
+    if not paid:
+        return response.status_code >= 400 and response.status_code != 402
+    if response.status_code != 401 or expires is None:
+        return False
+    if any(name in response.headers for name in _SETTLEMENT_HEADERS):
+        return False
+    return _unexpired(expires)
+
+
+def _unexpired(expires: datetime) -> bool:
+    """Whether ``expires`` is still in the future."""
+    return expires.timestamp() > time.time()
+
+
+def _parse_expires(expires: str | None) -> datetime | None:
+    if not expires:
+        return None
+    try:
+        return datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _resendable_expiry(request: httpx.Request, challenge: Challenge | None) -> datetime | None:
+    """The expiry of the Challenge a paid attempt may be resent for, if any.
+
+    That is ``challenge`` (or, without one, the Challenge of the request's Payment credential),
+    when a header holds a Payment credential for it. A request carrying an x402 credential
+    header is never resent, nor one whose Payment credential answers another Challenge, nor
+    one whose Challenge has no ``expires``.
+    """
+    if any(name.lower() in _X402_HEADERS for name in request.headers):
+        return None
+    echoes: list[ChallengeEcho] = []
+    for value in request.headers.values():
+        for part in value.split(","):
+            if not part.strip().lower().startswith("payment "):
+                continue
+            try:
+                echoes.append(parse_authorization(part).challenge)
+            except Exception:  # noqa: BLE001 - an unreadable credential is never resent
+                continue
+    if challenge is not None:
+        if any(echo.id == challenge.id for echo in echoes):
+            return _parse_expires(challenge.expires)
+        return None
+    return _parse_expires(echoes[0].expires) if echoes else None
+
+
+async def _detach(response: httpx.Response) -> httpx.Response:
+    """Read a rejected response into a copy within a size and time bound, then release it.
+
+    A body larger than 64 KiB, or still arriving after 2 seconds, is cut off to what arrived,
+    marked with an ``Mppx-Body-Truncated: true`` header.
+    """
+    chunks: list[bytes] = []
+    received = 0
+    truncated = True
+    try:
+        if response.is_stream_consumed:
+            # A retry hook already read the body.
+            chunks.append(response.content)
+            received = len(response.content)
+            truncated = received > _MAX_FALLBACK_BYTES
+        else:
+            with anyio.move_on_after(_FALLBACK_TIMEOUT):
+                async for chunk in response.aiter_raw():
+                    chunks.append(chunk)
+                    received += len(chunk)
+                    if received > _MAX_FALLBACK_BYTES:
+                        break
+                else:
+                    truncated = False
+    except Exception:  # noqa: BLE001 - a failed read keeps what arrived
+        truncated = True
+    finally:
+        await response.aclose()
+    headers = httpx.Headers(response.headers)
+    if truncated:
+        headers.pop("content-length", None)
+        headers["Mppx-Body-Truncated"] = "true"
+    copy = httpx.Response(
+        response.status_code,
+        headers=headers,
+        stream=httpx.ByteStream(b"".join(chunks)[:_MAX_FALLBACK_BYTES]),
+        extensions=dict(response.extensions),
+    )
+    try:
+        copy.request = response.request
+    except RuntimeError:  # the transport sets no request
+        pass
+    return copy
 
 
 def _merge(previous: HeaderPairs, next: HeaderPairs) -> HeaderPairs:
