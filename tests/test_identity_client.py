@@ -842,6 +842,37 @@ async def test_auxiliary_requests_are_proved_too() -> None:
     assert [request.headers["X-Api-Key"] for request in seen] == ["alice"]
 
 
+@pytest.mark.parametrize(("streaming", "attempts"), [(True, 1), (False, 2)])
+async def test_a_paid_auxiliary_request_is_resent_only_with_a_buffered_body(
+    streaming: bool, attempts: int
+) -> None:
+    from mpp.client import PaymentTransport
+
+    bodies: list[bytes] = []
+
+    async def reject(request: httpx.Request) -> httpx.Response:
+        bodies.append(await request.aread())
+        return httpx.Response(401)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"top-up"
+
+    transport = PaymentTransport(
+        [paying_method()],
+        identity=[header_prover("X-Proof", retry=resend_with({"X-Fresh": "1"}))],
+    )
+    transport._inner = httpx.MockTransport(reject)
+    request = httpx.Request(
+        "POST",
+        f"{API}/session/top-up",
+        content=chunks() if streaming else b"top-up",
+        headers={"Payment-Authorization": credential_for(live())},
+    )
+    response = await transport._send_auxiliary(request)
+    assert response.status_code == 401
+    assert bodies == [b"top-up"] * attempts
+
+
 @pytest.mark.parametrize(
     ("header", "challenge_header"),
     [("Authorization", None), ("Payment-Authorization", "Payment-Authorization")],

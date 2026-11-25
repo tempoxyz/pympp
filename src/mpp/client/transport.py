@@ -822,8 +822,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         """Send a request a payment method needs, without payment handling, and read it.
 
         Identity provers still prove it, so a session's top-up carries the caller's identity.
+        A streaming body is sent once: it is never resent after a rejection.
         """
-        response, _ = await self._send(request)
+        response, _ = await self._send(request, replayable=await _buffer_replayable(request))
         try:
             await response.aread()
         finally:
