@@ -362,6 +362,13 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             replayable=replayable,
         )
 
+    async def _buffer_resendable(self, request: httpx.Request) -> bool:
+        """Read a request's body into memory only if identity may resend it, and say whether it
+        can be resent; one that is never resent keeps streaming."""
+        if self._identity is None or not self._identity.may_resend(request):
+            return False
+        return await _buffer_replayable(request)
+
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
         return self._events.on(name, handler)
@@ -400,7 +407,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         if supplied_payment or request.extensions.get(_PAYMENT_ATTEMPTED_EXTENSION):
             # A request already carrying a credential is a paid attempt: identity resends it
             # only after a 401, with the same credential (mpp-specs §4.4.3).
-            response, _ = await self._send(request, replayable=await _buffer_replayable(request))
+            response, _ = await self._send(
+                request, replayable=await self._buffer_resendable(request)
+            )
             return response
 
         accept_payment = _accept_payment(self._runtime.methods)
@@ -824,7 +833,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         Identity provers still prove it, so a session's top-up carries the caller's identity.
         A streaming body is sent once: it is never resent after a rejection.
         """
-        response, _ = await self._send(request, replayable=await _buffer_replayable(request))
+        response, _ = await self._send(request, replayable=await self._buffer_resendable(request))
         try:
             await response.aread()
         finally:

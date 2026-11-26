@@ -595,6 +595,53 @@ async def test_a_decoded_paid_401_is_copied_without_its_encoding() -> None:
     assert await copy.aread() == b"denied"
 
 
+async def test_a_truncated_encoded_paid_401_is_copied_without_its_partial_body() -> None:
+    raw = b"x" * (64 * 1024 + 1)
+    rejected = httpx.Response(
+        401,
+        headers={"Content-Encoding": "gzip", "Content-Length": str(len(raw))},
+        stream=httpx.ByteStream(raw),
+    )
+    copy = await _detach(rejected)
+    assert "content-encoding" not in copy.headers
+    assert "content-length" not in copy.headers
+    assert copy.headers["Mppx-Body-Truncated"] == "true"
+    assert await copy.aread() == b""
+
+
+@pytest.mark.parametrize(
+    ("retry", "expired", "buffered"),
+    [(False, False, False), (True, True, False), (True, False, True)],
+)
+async def test_a_credentialed_request_is_buffered_only_when_it_may_be_resent(
+    retry: bool, expired: bool, buffered: bool
+) -> None:
+    from mpp.client import PaymentTransport
+
+    class Accept(httpx.AsyncBaseTransport):
+        # Unlike httpx.MockTransport, it never reads the request body itself.
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200)
+
+    target = live(seconds=-300 if expired else 300)
+    prover = header_prover("X-Proof", retry=resend_with({"X-Fresh": "1"}) if retry else None)
+    transport = PaymentTransport([paying_method()], identity=[prover])
+    transport._inner = Accept()
+    request = httpx.Request(
+        "POST",
+        f"{API}/upload",
+        files={"file": ("a.bin", b"data")},
+        headers={"Authorization": credential_for(target)},
+    )
+    response = await transport.handle_async_request(request)
+    assert response.status_code == 200
+    try:
+        read = bool(request.content)
+    except httpx.RequestNotRead:
+        read = False
+    assert read == buffered
+
+
 class TrackedStream(httpx.AsyncByteStream):
     """A response body that records when its connection is released."""
 

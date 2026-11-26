@@ -88,6 +88,20 @@ class IdentityClient:
             if name.lower() in self.sensitive_headers:
                 del request.headers[name]
 
+    def may_resend(self, request: httpx.Request, challenge: Challenge | None = None) -> bool:
+        """Whether :meth:`send` could resend ``request`` after a rejection.
+
+        Only then must its body stay readable for a second send: a prover in scope has a
+        ``retry`` hook and, for a paid attempt, its Payment credential answers a Challenge that
+        has not expired (mppx ``keepReadable``).
+        """
+        if not any(prover.retry for prover in self.in_scope(request.url)):
+            return False
+        if challenge is None and not is_paid(request):
+            return True
+        expires = _resendable_expiry(request, challenge)
+        return expires is not None and _unexpired(expires)
+
     async def send(
         self,
         send: Send,
@@ -322,8 +336,9 @@ def _resendable_expiry(request: httpx.Request, challenge: Challenge | None) -> d
 async def _detach(response: httpx.Response) -> httpx.Response:
     """Read a rejected response into a copy within a size and time bound, then release it.
 
-    A body larger than 64 KiB, or still arriving after 2 seconds, is cut off to what arrived,
-    marked with an ``Mppx-Body-Truncated: true`` header.
+    A body larger than 64 KiB, or still arriving after 2 seconds, is cut off to what arrived (or
+    dropped if it is encoded, since a partial encoding cannot be decoded reliably), marked with
+    an ``Mppx-Body-Truncated: true`` header.
     """
     chunks: list[bytes] = []
     received = 0
@@ -355,6 +370,9 @@ async def _detach(response: httpx.Response) -> httpx.Response:
         headers.pop("content-encoding", None)
         headers.pop("content-length", None)
     if truncated:
+        if headers.pop("content-encoding", "identity").lower() != "identity":
+            # A cut-off encoded body cannot be decoded reliably, so it is dropped.
+            chunks.clear()
         headers.pop("content-length", None)
         headers["Mppx-Body-Truncated"] = "true"
     copy = httpx.Response(
