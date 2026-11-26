@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import gzip
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
 
-from mpp import Challenge, Credential
+from mpp import Challenge, Credential, PaymentOutcomeUnknownError
 from mpp.client import Mpp
-from mpp.client._identity import IdentityClient, is_paid
+from mpp.client._identity import IdentityClient, _detach, is_paid
 from mpp.identity import (
     PaymentCheck,
     PaymentCheckInput,
@@ -264,6 +267,421 @@ async def test_a_streaming_body_is_not_resent() -> None:
     assert len(send.sent) == 1
 
 
+# --- Resending a paid attempt after a 401 (mpp-specs §4.4.3) ----------------------------------
+
+
+def live(id: str = "live", seconds: float = 60) -> Challenge:
+    expires = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+    return Challenge(
+        id=id, realm="api.example", method="tempo", intent="charge", request={}, expires=expires
+    )
+
+
+def credential_for(target: Challenge) -> str:
+    return Credential(challenge=target.to_echo(), payload={}).to_authorization()
+
+
+async def test_a_paid_401_is_resent_once_with_the_same_credential_while_its_challenge_lives() -> (
+    None
+):
+    log: list[Any] = []
+    retries: list[int] = []
+
+    def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        retries.append(response.status_code)
+        return {"X-Token": "fresh"}
+
+    client = IdentityClient([header_prover("X-Proof", retry=retry, log=log)])
+    target = live()
+    credential = credential_for(target)
+    send = Script(httpx.Response(401), httpx.Response(401))
+    paid = httpx.Request(
+        "POST",
+        API,
+        content=b"x",
+        headers={"Payment-Authorization": credential, "X-Token": "stale"},
+    )
+    response, carried = await client.send(send, paid, challenge=target)
+    assert response.status_code == 401
+    assert len(send.sent) == 2 and retries == [401], "resent once: a second 401 is final"
+    assert carried == (("X-Token", "fresh"),)
+    assert [r.headers["Payment-Authorization"] for r in send.sent] == [credential, credential]
+    assert [r.headers["X-Token"] for r in send.sent] == ["stale", "fresh"]
+    assert await send.sent[1].aread() == b"x"
+    assert len({context.nonce for _, context in log}) == 2, "the resend is proved afresh"
+
+
+async def test_a_paid_attempt_is_never_resent_after_a_403_or_once_its_challenge_expired() -> None:
+    retries: list[int] = []
+
+    def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        retries.append(response.status_code)
+        return {"X-Token": "fresh"}
+
+    client = IdentityClient([header_prover("X-Proof", retry=retry)])
+    send = Script(httpx.Response(403), httpx.Response(401), httpx.Response(401))
+    target, expired = live(), live(seconds=-1)
+    await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+        challenge=target,
+    )
+    await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(expired)}),
+        challenge=expired,
+    )
+    # A credential whose Challenge is unknown (x402) is never resent.
+    await client.send(send, httpx.Request("GET", API, headers={"Payment-Signature": "x"}))
+    assert len(send.sent) == 3 and retries == []
+
+
+@pytest.mark.parametrize("header", ["Payment-Receipt", "Payment-Response", "X-Payment-Response"])
+async def test_a_paid_401_reporting_settlement_is_never_resent(header: str) -> None:
+    retries: list[int] = []
+
+    def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        retries.append(response.status_code)
+        return {"X-Token": "fresh"}
+
+    client = IdentityClient([header_prover("X-Proof", retry=retry)])
+    target = live()
+    send = Script(httpx.Response(401, headers={header: "r"}, content=b"denied"))
+    response, _ = await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+        challenge=target,
+    )
+    assert len(send.sent) == 1 and retries == []
+    assert response.headers[header] == "r"
+    assert await response.aread() == b"denied"
+
+
+async def test_a_paid_attempt_is_resent_only_for_the_credential_answering_its_challenge() -> None:
+    client = IdentityClient([header_prover("X-Proof", retry=resend_with({"X-Token": "fresh"}))])
+    transport, other = live("transport"), credential_for(live("other"))
+    send = Script(httpx.Response(401), httpx.Response(401))
+    # An x402 credential beside an unrelated Payment credential.
+    await client.send(
+        send,
+        httpx.Request(
+            "GET", API, headers={"Payment-Authorization": other, "Payment-Signature": "x402"}
+        ),
+        challenge=transport,
+    )
+    # A Payment credential for another Challenge than the transport's.
+    await client.send(
+        send, httpx.Request("GET", API, headers={"Authorization": other}), challenge=transport
+    )
+    assert len(send.sent) == 2
+
+
+async def test_a_caller_supplied_credential_is_resent_for_its_own_challenge() -> None:
+    client = IdentityClient([header_prover("X-Proof", retry=resend_with({"X-Token": "fresh"}))])
+    send = Script(httpx.Response(401), httpx.Response(200))
+    credential = credential_for(live())
+    response, _ = await client.send(
+        send, httpx.Request("GET", API, headers={"Authorization": credential})
+    )
+    assert response.status_code == 200
+    assert [r.headers["Authorization"] for r in send.sent] == [credential, credential]
+
+
+async def test_a_paid_401_is_returned_when_its_challenge_expires_while_identity_refreshes() -> None:
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        return request
+
+    async def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        await asyncio.sleep(0.2)
+        return {"X-Token": "fresh"}
+
+    client = IdentityClient([Prover(scope=(API,), prove=prove, retry=retry)])
+    target = live(seconds=0.1)
+    send = Script(httpx.Response(401, content=b"stale"))
+    response, carried = await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+        challenge=target,
+    )
+    assert len(send.sent) == 1 and carried == ()
+    assert response.status_code == 401
+    assert await response.aread() == b"stale"
+
+
+async def test_a_paid_401_is_returned_when_a_retry_hook_or_re_proving_fails() -> None:
+    target = live()
+    paid = httpx.Request("GET", API, headers={"Authorization": credential_for(target)})
+
+    async def failing_retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        raise RuntimeError("hook failed")
+
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        return request
+
+    client = IdentityClient([Prover(scope=(API,), prove=prove, retry=failing_retry)])
+    send = Script(httpx.Response(401, content=b"denied"))
+    response, _ = await client.send(send, paid, challenge=target)
+    assert len(send.sent) == 1 and await response.aread() == b"denied"
+
+    proves = 0
+
+    async def failing_prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        nonlocal proves
+        proves += 1
+        if proves > 1:
+            raise RuntimeError("prove failed")
+        return request
+
+    async def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        return {}
+
+    client = IdentityClient([Prover(scope=(API,), prove=failing_prove, retry=retry)])
+    send = Script(httpx.Response(401, content=b"denied"))
+    response, _ = await client.send(send, paid, challenge=target)
+    assert len(send.sent) == 1 and response.status_code == 401
+    assert await response.aread() == b"denied"
+
+
+async def test_a_large_paid_401_body_is_truncated_when_kept_for_a_resend_that_never_happens() -> (
+    None
+):
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        if context.challenge is not None and proved:
+            raise RuntimeError("prove failed")
+        proved.append(True)
+        return request
+
+    proved: list[bool] = []
+
+    async def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        return {}
+
+    client = IdentityClient([Prover(scope=(API,), prove=prove, retry=retry)])
+    target = live()
+    send = Script(httpx.Response(401, content=b"a" * (64 * 1024 + 1)))
+    response, _ = await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+        challenge=target,
+    )
+    assert response.headers["Mppx-Body-Truncated"] == "true"
+    assert len(await response.aread()) == 64 * 1024
+
+
+class ScriptedTransport(httpx.AsyncBaseTransport):
+    """Answers with responses built per call, recording what it was sent."""
+
+    def __init__(self, respond: Callable[[int], httpx.Response]) -> None:
+        self.respond = respond
+        self.requests: list[httpx.Request] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        await request.aread()
+        return self.respond(len(self.requests))
+
+
+async def test_headers_a_paid_attempt_was_resent_with_reach_the_next_paid_attempt() -> None:
+    def respond(call: int) -> httpx.Response:
+        if call in (1, 3):
+            offer = live(f"c{call}")
+            return httpx.Response(
+                402, headers={"WWW-Authenticate": offer.to_www_authenticate("api.example")}
+            )
+        # The paid attempt's identity expired: a 401, then a fresh 402 after the resend.
+        if call == 2:
+            return httpx.Response(401)
+        return httpx.Response(200, content=b"ok")
+
+    transport = ScriptedTransport(respond)
+    prover = header_prover("X-Proof", retry=resend_with({"X-Token": "fresh"}))
+    mpp = Mpp(methods=[paying_method()], identity=[prover])
+    mpp.payment_transport._inner = transport
+    async with mpp:
+        response = await mpp.fetch(f"{API}/paid")
+    assert response.status_code == 200
+    assert [r.headers.get("X-Token") for r in transport.requests] == [None, None, "fresh", "fresh"]
+
+
+async def test_a_paid_resend_that_fails_in_transport_propagates() -> None:
+    client = IdentityClient([header_prover("X-Proof", retry=resend_with({"X-Token": "fresh"}))])
+    target = live()
+    calls = 0
+
+    async def send(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(401, content=b"denied", request=request)
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    with pytest.raises(httpx.ReadTimeout):
+        await client.send(
+            send,
+            httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+            challenge=target,
+        )
+    assert calls == 2
+
+
+async def test_a_paid_resend_failing_in_transport_leaves_the_outcome_unknown() -> None:
+    def respond(call: int) -> httpx.Response:
+        if call == 1:
+            return httpx.Response(
+                402, headers={"WWW-Authenticate": live("c1").to_www_authenticate("api.example")}
+            )
+        if call == 2:
+            return httpx.Response(401, content=b"denied")
+        raise httpx.ReadTimeout("timed out")
+
+    transport = ScriptedTransport(respond)
+    prover = header_prover("X-Proof", retry=resend_with({"X-Token": "fresh"}))
+    mpp = Mpp(methods=[paying_method()], identity=[prover])
+    mpp.payment_transport._inner = transport
+    async with mpp:
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await mpp.fetch(f"{API}/paid")
+    assert len(transport.requests) == 3
+
+
+async def test_a_gzip_paid_401_read_by_a_retry_hook_is_returned_readable() -> None:
+    proves = 0
+
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        nonlocal proves
+        proves += 1
+        if proves > 1:
+            raise RuntimeError("prove failed")
+        return request
+
+    bodies: list[bytes] = []
+
+    async def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str]:
+        bodies.append(await response.aread())
+        return {}
+
+    client = IdentityClient([Prover(scope=(API,), prove=prove, retry=retry)])
+    target = live()
+    body = gzip.compress(b"denied")
+    send = Script(
+        httpx.Response(
+            401,
+            headers={"Content-Encoding": "gzip", "Content-Length": str(len(body))},
+            stream=httpx.ByteStream(body),
+        )
+    )
+    response, _ = await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+        challenge=target,
+    )
+    assert bodies == [b"denied"]
+    assert response.status_code == 401
+    assert await response.aread() == b"denied"
+    assert response.text == "denied"
+
+
+async def test_a_decoded_paid_401_is_copied_without_its_encoding() -> None:
+    body = gzip.compress(b"denied")
+    rejected = httpx.Response(
+        401,
+        headers={"Content-Encoding": "gzip", "Content-Length": str(len(body))},
+        stream=httpx.ByteStream(body),
+    )
+    await rejected.aread()
+    copy = await _detach(rejected)
+    assert "content-encoding" not in copy.headers
+    assert "content-length" not in copy.headers
+    assert await copy.aread() == b"denied"
+
+
+async def test_a_truncated_encoded_paid_401_is_copied_without_its_partial_body() -> None:
+    raw = b"x" * (64 * 1024 + 1)
+    rejected = httpx.Response(
+        401,
+        headers={"Content-Encoding": "gzip", "Content-Length": str(len(raw))},
+        stream=httpx.ByteStream(raw),
+    )
+    copy = await _detach(rejected)
+    assert "content-encoding" not in copy.headers
+    assert "content-length" not in copy.headers
+    assert copy.headers["Mppx-Body-Truncated"] == "true"
+    assert await copy.aread() == b""
+
+
+@pytest.mark.parametrize(
+    ("retry", "expired", "buffered"),
+    [(False, False, False), (True, True, False), (True, False, True)],
+)
+async def test_a_credentialed_request_is_buffered_only_when_it_may_be_resent(
+    retry: bool, expired: bool, buffered: bool
+) -> None:
+    from mpp.client import PaymentTransport
+
+    class Accept(httpx.AsyncBaseTransport):
+        # Unlike httpx.MockTransport, it never reads the request body itself.
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200)
+
+    target = live(seconds=-300 if expired else 300)
+    prover = header_prover("X-Proof", retry=resend_with({"X-Fresh": "1"}) if retry else None)
+    transport = PaymentTransport([paying_method()], identity=[prover])
+    transport._inner = Accept()
+    request = httpx.Request(
+        "POST",
+        f"{API}/upload",
+        files={"file": ("a.bin", b"data")},
+        headers={"Authorization": credential_for(target)},
+    )
+    response = await transport.handle_async_request(request)
+    assert response.status_code == 200
+    try:
+        read = bool(request.content)
+    except httpx.RequestNotRead:
+        read = False
+    assert read == buffered
+
+
+class TrackedStream(httpx.AsyncByteStream):
+    """A response body that records when its connection is released."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield self.body
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_a_paid_401_is_released_before_retry_hooks_run() -> None:
+    stream = TrackedStream(b"denied")
+    released: list[bool] = []
+
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        return request
+
+    async def retry(response: httpx.Response, context: RetryContext) -> Mapping[str, str] | None:
+        # A hook refreshing identity through the same pool needs the connection free.
+        released.append(stream.closed)
+        assert await response.aread() == b"denied"
+        return None
+
+    client = IdentityClient([Prover(scope=(API,), prove=prove, retry=retry)])
+    target = live()
+    send = Script(httpx.Response(401, stream=stream))
+    response, _ = await client.send(
+        send,
+        httpx.Request("GET", API, headers={"Authorization": credential_for(target)}),
+        challenge=target,
+    )
+    assert released == [True]
+    assert len(send.sent) == 1
+    assert await response.aread() == b"denied"
+
+
 # --- Preparing ----------------------------------------------------------------------------------
 
 
@@ -469,6 +887,37 @@ async def test_auxiliary_requests_are_proved_too() -> None:
     transport._inner = httpx.MockTransport(record)
     await transport._send_auxiliary(httpx.Request("POST", f"{API}/session/top-up"))
     assert [request.headers["X-Api-Key"] for request in seen] == ["alice"]
+
+
+@pytest.mark.parametrize(("streaming", "attempts"), [(True, 1), (False, 2)])
+async def test_a_paid_auxiliary_request_is_resent_only_with_a_buffered_body(
+    streaming: bool, attempts: int
+) -> None:
+    from mpp.client import PaymentTransport
+
+    bodies: list[bytes] = []
+
+    async def reject(request: httpx.Request) -> httpx.Response:
+        bodies.append(await request.aread())
+        return httpx.Response(401)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"top-up"
+
+    transport = PaymentTransport(
+        [paying_method()],
+        identity=[header_prover("X-Proof", retry=resend_with({"X-Fresh": "1"}))],
+    )
+    transport._inner = httpx.MockTransport(reject)
+    request = httpx.Request(
+        "POST",
+        f"{API}/session/top-up",
+        content=chunks() if streaming else b"top-up",
+        headers={"Payment-Authorization": credential_for(live())},
+    )
+    response = await transport._send_auxiliary(request)
+    assert response.status_code == 401
+    assert bodies == [b"top-up"] * attempts
 
 
 @pytest.mark.parametrize(

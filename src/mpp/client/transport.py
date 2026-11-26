@@ -362,6 +362,13 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             replayable=replayable,
         )
 
+    async def _buffer_resendable(self, request: httpx.Request) -> bool:
+        """Read a request's body into memory only if identity may resend it, and say whether it
+        can be resent; one that is never resent keeps streaming."""
+        if self._identity is None or not self._identity.may_resend(request):
+            return False
+        return await _buffer_replayable(request)
+
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
         return self._events.on(name, handler)
@@ -398,20 +405,18 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 raise PaymentError("Refusing to send payment credential across redirect")
             request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
         if supplied_payment or request.extensions.get(_PAYMENT_ATTEMPTED_EXTENSION):
-            # A request already carrying a credential is a paid attempt: never resent.
-            response, _ = await self._send(request)
+            # A request already carrying a credential is a paid attempt: identity resends it
+            # only after a 401, with the same credential (mpp-specs §4.4.3).
+            response, _ = await self._send(
+                request, replayable=await self._buffer_resendable(request)
+            )
             return response
 
         accept_payment = _accept_payment(self._runtime.methods)
         if accept_payment and "accept-payment" not in request.headers:
             request.headers["Accept-Payment"] = accept_payment
 
-        replayable = not (
-            isinstance(request.stream, httpx.AsyncByteStream)
-            and not isinstance(request.stream, httpx.SyncByteStream)
-        )
-        if replayable:
-            await request.aread()
+        replayable = await _buffer_replayable(request)
 
         response, carried = await self._send(request, replayable=replayable)
         # The last credential sent, until the method settles its outcome (mppx Fetch).
@@ -709,7 +714,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 try:
                     # Identity proofs bind to the Challenge the credential pays, which is
                     # an earlier one when a Zone withdrawal was resumed (mppx).
-                    payment_response, _ = await self._send(
+                    # Retry headers a paid attempt was resent with replace the carried
+                    # ones, so a later paid attempt carries them too (mppx).
+                    payment_response, carried = await self._send(
                         retry_request,
                         challenge=_credential_challenge(credential, challenge),
                         carried=carried,
@@ -824,8 +831,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         """Send a request a payment method needs, without payment handling, and read it.
 
         Identity provers still prove it, so a session's top-up carries the caller's identity.
+        A streaming body is sent once: it is never resent after a rejection.
         """
-        response, _ = await self._send(request)
+        response, _ = await self._send(request, replayable=await self._buffer_resendable(request))
         try:
             await response.aread()
         finally:
@@ -845,6 +853,17 @@ class _SentCredential:
     method: ClientMethod
     credential: Credential
     attempt: PaymentAttempt
+
+
+async def _buffer_replayable(request: httpx.Request) -> bool:
+    """Read a request's body into memory unless it streams, and say whether it can be resent."""
+    replayable = not (
+        isinstance(request.stream, httpx.AsyncByteStream)
+        and not isinstance(request.stream, httpx.SyncByteStream)
+    )
+    if replayable:
+        await request.aread()
+    return replayable
 
 
 def _credential_challenge(credential: Credential, selected: Challenge) -> Challenge:
