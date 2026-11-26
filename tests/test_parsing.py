@@ -168,6 +168,8 @@ class TestChallenge:
             'Payment id=test realm="api.example.com", method="tempo", '
             'intent="charge", request="e30"',
             'Payment id="test", realm=api example, method="tempo", intent="charge", request="e30"',
+            'Payment id="a", realm=api/v1, method="tempo", intent="charge", request="e30"',
+            'Payment id="a", realm=, method="tempo", intent="charge", request="e30"',
         ],
         ids=[
             "junk",
@@ -179,6 +181,8 @@ class TestChallenge:
             "whitespace-separated",
             "whitespace-after-token",
             "whitespace-in-token",
+            "non-token-character",
+            "empty-token",
         ],
     )
     def test_parse_rejects_malformed_auth_params(self, header: str) -> None:
@@ -200,6 +204,18 @@ class TestChallenge:
             "tempo",
             "charge",
         )
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            'Payment id="a", realm="api", method="tempo", intent="charge", request="e30", '
+            'Basic realm="x"',
+            "Payment id=a, realm=api, method=tempo, intent=charge, request=e30, Bearer token68==",
+        ],
+    )
+    def test_parse_reads_payment_beside_other_schemes(self, header: str) -> None:
+        challenge = Challenge.from_www_authenticate(header)
+        assert (challenge.id, challenge.realm) == ("a", "api")
 
     def test_parse_stops_at_next_auth_scheme(self) -> None:
         header = (
@@ -1271,10 +1287,13 @@ class TestEncodingBoundaries:
 
         assert _unescape_quoted("\\ud800xudc00") == "ud800xudc00"
 
-    def test_unquoted_auth_param_keeps_backslashes(self) -> None:
+    def test_unquoted_auth_param_rejects_backslashes(self) -> None:
         from mpp._parsing import _parse_auth_params
 
-        assert _parse_auth_params('a=x\\u0041, b="x\\u0041"') == {"a": "x\\u0041", "b": "xu0041"}
+        # A backslash is not a tchar: only a quoted-string carries quoted-pairs (mppx).
+        with pytest.raises(ParseError, match="Malformed auth-param"):
+            _parse_auth_params('a=x\\u0041, b="x\\u0041"')
+        assert _parse_auth_params('b="x\\u0041"') == {"b": "xu0041"}
 
     def test_receipt_timestamp_is_formatted_with_z(self) -> None:
         receipt = Receipt.success("0xabc", timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
